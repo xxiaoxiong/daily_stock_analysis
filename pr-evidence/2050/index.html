@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>PR #2050 — Issue #1970 Web UI 验收截图</title>
+<style>
+body{font-family:-apple-system,'PingFang SC',sans-serif;max-width:1280px;margin:0 auto;padding:24px;background:#fafafa;color:#222;line-height:1.65}
+h1{font-size:22px;border-bottom:2px solid #1f6feb;padding-bottom:8px;margin:0 0 16px}
+h2{font-size:18px;border-left:4px solid #1f6feb;padding-left:10px;margin:32px 0 12px}
+figure{margin:0 0 24px;background:#fff;border:1px solid #e3e3e3;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06)}
+figcaption{padding:12px 16px;border-bottom:1px solid #e3e3e3;background:#f6f8fa;font-size:14px;color:#555}
+figcaption b{color:#222}
+figcaption code{background:#eef;padding:1px 6px;border-radius:3px;color:#c83737;font-size:13px}
+img{display:block;width:100%;height:auto}
+.row::after{content:"";display:table;clear:both}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.row figure{margin:0}
+.summary{background:#fff3cd;border:1px solid #ffe69c;padding:14px 18px;border-radius:6px;font-size:14px;margin:16px 0 28px}
+.summary ul{margin:6px 0 0;padding-left:22px}
+</style>
+</head>
+<body>
+<h1>PR #2050 Web UI 可视化验收截图（Issue #1970 加固）</h1>
+
+<div class="summary">
+<b>已确认的关键契约与覆盖：</b>
+<ul>
+<li><b>Backend 单元测试</b> — <code>tests/test_auth_api.py</code> 13 个 disable/current_password 相关 case 全部通过（<code>test_disable_auth_with_valid_session_but_no_current_password_returns_400</code> 等）。</li>
+<li><b>Frontend 单元测试</b> — <code>AuthSettingsCard.test.tsx</code> 6 个 case 全部通过。</li>
+<li><b>端到端可视验收（本目录截图）</b> — 走真实 dsa-web vite dev (:5173) + dsa-api uvicorn (:8001)，passwd6=管理员密码；中英文各一轮。</li>
+</ul>
+</div>
+
+<h2>中文（zh）</h2>
+
+<figure>
+<figcaption><b>zh-01</b> 登录页 ·  管理员密码 <code>passwd6</code></figcaption>
+<img src="zh-01-login-as-admin.png" alt="zh-01 登录页">
+</figure>
+
+<figure>
+<figcaption><b>zh-02</b> 设置 → 系统设置 → 认证与登录保护：badge 显示「已启用」，<code>AuthSettingsCard</code> 渲染 Checkbox + 当前管理员密码输入框</figcaption>
+<img src="zh-02-settings-auth-on.png" alt="zh-02 已启用">
+</figure>
+
+<figure>
+<figcaption><b>zh-03</b> 勾掉「认证」复选框后，<b>未填</b>当前管理员密码，直接点「关闭认证」按钮：<b>出现内联错误「关闭认证前必须输入当前管理员密码」</b>（PR #2050 核心契约）</figcaption>
+<img src="zh-03-disable-no-current.png" alt="zh-03 内联错误">
+</figure>
+
+<figure>
+<figcaption><b>zh-04</b> 填入 <code>passwd6</code> 后点「关闭认证」：<b>认证已关闭</b>，badge 切「未启用」，<code>authEnabled=false</code></figcaption>
+<img src="zh-04-disable-with-current.png" alt="zh-04 关闭成功">
+</figure>
+
+<h2>English (en)</h2>
+
+<figure>
+<figcaption><b>en-01</b> Login as admin with <code>passwd6</code></figcaption>
+<img src="en-01-login-as-admin.png" alt="en-01 login">
+</figure>
+
+<figure>
+<figcaption><b>en-02</b> Settings → System → Authentication & sign-in protection card. Badge reads <b>Enabled</b>; current-password field rendered.</figcaption>
+<img src="en-02-settings-auth-on.png" alt="en-02 enabled">
+</figure>
+
+<figure>
+<figcaption><b>en-03</b> Uncheck Enable, leave current password <b>blank</b>, click <b>Disable authentication</b>: inline error <b>"… must enter current admin password before disabling authentication"</b></figcaption>
+<img src="en-03-disable-no-current.png" alt="en-03 inline error">
+</figure>
+
+<figure>
+<figcaption><b>en-04</b> Fill <code>passwd6</code>, click <b>Disable authentication</b>: auth disabled, badge → <b>Disabled</b>, <code>authEnabled=false</code></figcaption>
+<img src="en-04-disable-with-current.png" alt="en-04 disable success">
+</figure>
+
+</body>
+</html>
