@@ -259,16 +259,23 @@ def _diagnostic_field_name_pattern() -> str:
         | _SENSITIVE_ENV_EXACT_NAMES
         | _registered_sensitive_env_exact_names()
     )
-    spaced_sensitive_names = "|".join(
-        re.escape(name).replace("_", r"[ \t]+")
-        for name in sorted(
-            (name for name in sensitive_names if "_" in name),
-            key=len,
-            reverse=True,
-        )
+    title_patterns = sorted(
+        (re.escape(title) for title in _registered_sensitive_field_titles()),
+        key=len,
+        reverse=True,
     )
+    spaced_sensitive_names = sorted(
+        (
+            re.escape(name).replace("_", r"[ \t]+")
+            for name in sensitive_names
+            if "_" in name
+        ),
+        key=len,
+        reverse=True,
+    )
+    explicit_sensitive_names = "|".join(title_patterns + spaced_sensitive_names)
     return (
-        rf"(?:(?i:{spaced_sensitive_names})|"
+        rf"(?:(?i:{explicit_sensitive_names})|"
         r"[A-Za-z][A-Za-z0-9_-]*)"
     )
 
@@ -330,6 +337,7 @@ def _diagnostic_yaml_explicit_key_pattern() -> re.Pattern[str]:
         rf"""
         ^
         (?P<indent>[ ]*)
+        (?P<sequence_prefix>-[ \t]+)?
         \?[ \t]+
         (?P<name_quote>['"]?)
         (?P<name>{_diagnostic_field_name_pattern()})
@@ -632,21 +640,61 @@ def _sensitive_exact_diagnostic_field_names() -> frozenset[str]:
 
 
 @lru_cache(maxsize=1)
+def _registered_sensitive_field_titles() -> frozenset[str]:
+    try:
+        from src.core.config_registry import _FIELD_DEFINITIONS
+    except Exception:
+        return frozenset()
+
+    return frozenset(
+        str(metadata.get("title"))
+        for metadata in _FIELD_DEFINITIONS.values()
+        if isinstance(metadata, Mapping)
+        and metadata.get("is_sensitive")
+        and isinstance(metadata.get("title"), str)
+        and metadata.get("title")
+    )
+
+
+def _compact_diagnostic_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "", str(name or "")).upper()
+
+
+@lru_cache(maxsize=1)
 def _compact_sensitive_exact_diagnostic_field_names() -> frozenset[str]:
     return frozenset(
-        re.sub(r"[-_ \t]+", "", name)
+        _compact_diagnostic_name(name)
         for name in _sensitive_exact_diagnostic_field_names()
+    )
+
+
+@lru_cache(maxsize=1)
+def _sensitive_registered_diagnostic_field_titles() -> frozenset[str]:
+    return frozenset(title.upper() for title in _registered_sensitive_field_titles())
+
+
+@lru_cache(maxsize=1)
+def _compact_sensitive_registered_diagnostic_field_titles() -> frozenset[str]:
+    return frozenset(
+        _compact_diagnostic_name(title) for title in _registered_sensitive_field_titles()
     )
 
 
 def _is_sensitive_structured_assignment_name(name: str) -> bool:
     exact_name = _normalize_diagnostic_field_name(name).upper()
-    compact_name = re.sub(r"[-_ \t]+", "", str(name or "")).upper()
+    upper_name = str(name or "").upper()
+    compact_name = _compact_diagnostic_name(name)
     return (
         _is_sensitive_diagnostic_field_name(name)
         or exact_name in _sensitive_exact_diagnostic_field_names()
+        or upper_name in _sensitive_registered_diagnostic_field_titles()
         or compact_name in _compact_sensitive_exact_diagnostic_field_names()
+        or compact_name in _compact_sensitive_registered_diagnostic_field_titles()
     )
+
+
+def _is_registered_sensitive_field_title(name: str) -> bool:
+    return str(name or "").upper() in _sensitive_registered_diagnostic_field_titles()
 
 
 def _leading_space_count(text: str) -> int:
@@ -800,6 +848,7 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
                 if (
                     ":" in match.group("separator")
                     and stripped_value != "<redacted>"
+                    and not _is_registered_sensitive_field_title(name)
                 ):
                     # An unquoted YAML scalar has no reliable same-line boundary.
                     # Fail closed instead of treating assignment-like text inside
@@ -881,7 +930,7 @@ def _redact_yaml_explicit_sensitive_fields(text: str) -> str:
             continue
 
         value_line = lines[index + 1]
-        base_indent = len(key_match.group("indent"))
+        base_indent = len(key_match.group("indent")) + len(key_match.group("sequence_prefix") or "")
         value_indent = _leading_space_count(value_line)
         value_content = value_line[value_indent:].rstrip("\r\n")
         if (
@@ -905,7 +954,7 @@ def _redact_yaml_explicit_sensitive_fields(text: str) -> str:
         )
         value = value_content[1:].lstrip(" \t")
         redacted_lines.append(key_line)
-        redacted_lines.append(f"{' ' * base_indent}: <redacted>{newline}")
+        redacted_lines.append(f"{' ' * value_indent}: <redacted>{newline}")
         index += 2
         allows_indentless_sequence = _yaml_value_allows_indentless_sequence(value)
 

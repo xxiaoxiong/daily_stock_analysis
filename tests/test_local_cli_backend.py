@@ -19,6 +19,7 @@ from tests.litellm_stub import ensure_litellm_stub
 ensure_litellm_stub()
 
 from src.analyzer import GeminiAnalyzer  # noqa: E402
+from src.core.config_registry import _FIELD_DEFINITIONS  # noqa: E402
 from src.llm import local_cli_backend as local_cli_backend_module  # noqa: E402
 from src.llm.generation_backend import GenerationError, GenerationErrorCode  # noqa: E402
 from src.llm.local_cli_backend import (  # noqa: E402
@@ -33,6 +34,20 @@ from src.llm.local_cli_backend import (  # noqa: E402
     effective_local_cli_concurrency,
     redact_diagnostic_text,
 )
+
+
+def _registered_sensitive_titles_needing_title_match() -> list[str]:
+    titles = []
+    for field_name, metadata in _FIELD_DEFINITIONS.items():
+        if not isinstance(metadata, dict) or not metadata.get("is_sensitive"):
+            continue
+        title = metadata.get("title")
+        if not isinstance(title, str) or not title:
+            continue
+        if title.upper() in {field_name.upper(), field_name.replace("_", " ").upper()}:
+            continue
+        titles.append(title)
+    return sorted(set(titles))
 
 
 def _config(**overrides):
@@ -1748,6 +1763,16 @@ def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
             ("tiny-secret",),
             "session_id: yaml123",
         ),
+        (
+            "- ? api_key\n  : tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+        (
+            "- ? credentials\n  :\n  - tiny-one\n  - tiny-two\nsession_id: yaml123\n",
+            ("tiny-one", "tiny-two"),
+            "session_id: yaml123",
+        ),
     ],
 )
 def test_diagnostics_redacts_yaml_explicit_sensitive_mappings(
@@ -1987,6 +2012,40 @@ def test_all_registered_sensitive_exact_names_are_redacted_as_spaced_labels(
 
     assert "tinyZ9" not in redacted
     assert "<redacted>" in redacted
+
+
+@pytest.mark.parametrize(
+    "field_title",
+    _registered_sensitive_titles_needing_title_match(),
+)
+def test_registered_sensitive_config_titles_are_redacted_as_structured_labels(
+    field_title: str,
+) -> None:
+    redacted = redact_diagnostic_text(
+        f"{field_title}: tiny-secret session_id=label123",
+        limit=1000,
+    )
+
+    assert "tiny-secret" not in redacted
+    assert "<redacted>" in redacted
+    assert "session_id=label123" in redacted
+
+
+@pytest.mark.parametrize(
+    "field_title",
+    _registered_sensitive_titles_needing_title_match(),
+)
+def test_registered_sensitive_config_titles_are_redacted_in_json(
+    field_title: str,
+) -> None:
+    redacted = redact_diagnostic_text(
+        json.dumps({field_title: "tiny-secret", "session_id": "json123"}),
+        limit=1000,
+    )
+
+    assert "tiny-secret" not in redacted
+    assert "<redacted>" in redacted
+    assert '"session_id": "json123"' in redacted
 
 
 def test_diagnostics_redacts_ansi_prefixed_sensitive_fields() -> None:
@@ -2377,12 +2436,15 @@ print('{"set-cookie":"session=cookie-header","session_id":"header123"}', file=sy
 print('{"api\\\\u005fkey":"escaped-json","session_id":"escaped123"}', file=sys.stderr)
 print("? api_key\\n: explicit-secret\\nsession_id: explicit123", file=sys.stderr)
 print("? 'api_key'\\n: quoted-explicit-secret\\nsession_id: quoted-explicit123", file=sys.stderr)
+print("- ? api_key\\n  : nested-explicit-secret\\nsession_id: nested-explicit123", file=sys.stderr)
+print("- ? credentials\\n  :\\n  - nested-one\\n  - nested-two\\nsession_id: nested-list123", file=sys.stderr)
 print("OPENAI_API_KEY='x'\\\"'\\\"'shell-quoted' session_id=quoted123", file=sys.stderr)
 print("OPENAI_API_KEY+=appended-secret session_id=append123", file=sys.stderr)
 print("{'api_key': 'single-quoted', 'session_id': 'single123'}", file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 print("OPENAI_FOO=\\\\ shell-short session_id=shell123", file=sys.stderr)
 print("API Key: label-short session_id=label123", file=sys.stderr)
+print("OpenAI API Keys (Multi): title-short session_id=title123", file=sys.stderr)
 raise SystemExit(2)
 """,
     )
@@ -2411,12 +2473,16 @@ raise SystemExit(2)
         "escaped-json",
         "explicit-secret",
         "quoted-explicit-secret",
+        "nested-explicit-secret",
+        "nested-one",
+        "nested-two",
         "shell-quoted",
         "appended-secret",
         "single-quoted",
         "yaml-short",
         "shell-short",
         "label-short",
+        "title-short",
     ):
         assert secret not in f"{stdout_preview}\n{stderr_preview}"
     assert "api_keys: <redacted>" in stdout_preview
@@ -2433,6 +2499,8 @@ raise SystemExit(2)
     assert r'{"api\u005fkey":"<redacted>","session_id":"escaped123"}' in stderr_preview
     assert "? api_key\n: <redacted>\nsession_id: explicit123" in stderr_preview
     assert "? 'api_key'\n: <redacted>\nsession_id: quoted-explicit123" in stderr_preview
+    assert "- ? api_key\n  : <redacted>\nsession_id: nested-explicit123" in stderr_preview
+    assert "- ? credentials\n  : <redacted>\nsession_id: nested-list123" in stderr_preview
     assert "OPENAI_API_KEY='<redacted>' session_id=quoted123" in stderr_preview
     assert "OPENAI_API_KEY+=<redacted> session_id=append123" in stderr_preview
     assert "{'api_key': '<redacted>', 'session_id': 'single123'}" in stderr_preview
@@ -2440,6 +2508,7 @@ raise SystemExit(2)
     assert "session_id: wecom123" in stderr_preview
     assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview
     assert "API Key: <redacted>" in stderr_preview
+    assert "OpenAI API Keys (Multi): <redacted>" in stderr_preview
 
 
 def test_nonzero_exit_diagnostic_previews_redact_repo_env_json_and_parameterized_auth(
