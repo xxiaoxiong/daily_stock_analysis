@@ -1686,6 +1686,17 @@ def test_diagnostics_redacts_yaml_scalars_with_spaces_and_blocks() -> None:
     assert "private_key: <redacted>" in redacted
 
 
+def test_diagnostics_redacts_indented_values_under_empty_sensitive_yaml_field() -> None:
+    text = "api_keys:\n  - tiny-one\n  - tiny-two\nsession_id: yaml123\n"
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tiny-one" not in redacted
+    assert "tiny-two" not in redacted
+    assert "api_keys: <redacted>\n" in redacted
+    assert "session_id: yaml123\n" in redacted
+
+
 def test_diagnostics_redacts_sensitive_collections() -> None:
     text = (
         "api_keys: [first-secret, second-secret] token_budget: 1000\n"
@@ -1699,6 +1710,26 @@ def test_diagnostics_redacts_sensitive_collections() -> None:
     assert "tiny-secret" not in redacted
     assert "api_keys: <redacted> token_budget: 1000" in redacted
     assert '{"credentials":<redacted>,"session_id":"abc123"}' in redacted
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"AIHUBMIX_KEY":"tinyZ9","session_id":"json123"}', '"AIHUBMIX_KEY":"<redacted>"'),
+        ('{"DINGTALK_APP_KEY":["tiny-one","tiny-two"],"session_id":"json456"}', '"DINGTALK_APP_KEY":<redacted>'),
+        ("PUSHOVER_USER_KEY: tinyZ9\nsession_id: yaml789\n", "PUSHOVER_USER_KEY: <redacted>\n"),
+    ],
+)
+def test_diagnostics_redacts_registered_sensitive_names_in_structured_assignments(
+    text: str,
+    expected: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tinyZ9" not in redacted
+    assert "tiny-one" not in redacted
+    assert "tiny-two" not in redacted
+    assert expected in redacted
 
 
 def test_diagnostics_redacts_ansi_prefixed_sensitive_fields() -> None:

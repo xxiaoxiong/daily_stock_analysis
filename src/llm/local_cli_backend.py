@@ -528,7 +528,7 @@ def _redact_assignment_value(match: re.Match[str]) -> str:
 def _is_field_specific_sensitive_redaction_target(name: str) -> bool:
     normalized_name = _normalize_diagnostic_field_name(name)
     return (
-        _is_sensitive_diagnostic_field_name(name)
+        _is_sensitive_structured_assignment_name(name)
         and normalized_name not in {"authorization", "proxy_authorization", "cookie"}
     )
 
@@ -545,6 +545,12 @@ def _is_sensitive_diagnostic_field_name(name: str) -> bool:
     return (
         normalized in _SENSITIVE_DIAGNOSTIC_FIELDS
         or any(normalized.endswith(suffix) for suffix in _SENSITIVE_DIAGNOSTIC_FIELD_SUFFIXES)
+    )
+
+
+def _is_sensitive_structured_assignment_name(name: str) -> bool:
+    return _is_sensitive_diagnostic_field_name(name) or str(name or "").upper() in (
+        _registered_sensitive_env_exact_names()
     )
 
 
@@ -588,7 +594,7 @@ def _redact_sensitive_collection_assignments(text: str) -> str:
     redacted = replace_matches(
         redacted,
         _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN,
-        _is_sensitive_diagnostic_field_name,
+        _is_sensitive_structured_assignment_name,
     )
     return replace_matches(
         redacted,
@@ -623,6 +629,14 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
 
             value = match.group("value")
             stripped_value = value.strip()
+            if ":" in match.group("separator") and not stripped_value:
+                replacement = "<redacted>"
+                if not match.group("separator")[-1:].isspace():
+                    replacement = f" {replacement}"
+                replacements.append((match.start("value"), match.end("value"), replacement))
+                block_match = block_match or match
+                continue
+
             if _is_yaml_block_scalar(value):
                 replacements.append((match.start("value"), match.end("value"), "<redacted>"))
                 block_match = block_match or match
@@ -707,7 +721,7 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
     redacted = _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN.sub(
         lambda match: (
             _redact_assignment_value(match)
-            if _is_sensitive_diagnostic_field_name(match.group("name"))
+            if _is_sensitive_structured_assignment_name(match.group("name"))
             else match.group(0)
         ),
         redacted,
