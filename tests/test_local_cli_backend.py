@@ -1713,23 +1713,97 @@ def test_diagnostics_redacts_sensitive_collections() -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    ("text", "secret_values", "preserved"),
     [
-        ('{"AIHUBMIX_KEY":"tinyZ9","session_id":"json123"}', '"AIHUBMIX_KEY":"<redacted>"'),
-        ('{"DINGTALK_APP_KEY":["tiny-one","tiny-two"],"session_id":"json456"}', '"DINGTALK_APP_KEY":<redacted>'),
-        ("PUSHOVER_USER_KEY: tinyZ9\nsession_id: yaml789\n", "PUSHOVER_USER_KEY: <redacted>\n"),
+        (
+            "api_keys:\n  - tiny-one\n  - tiny-two\nsession_id: abc123\n",
+            ("tiny-one", "tiny-two"),
+            "session_id: abc123",
+        ),
+        (
+            "credentials:\n  username: alice\n  value: tiny-secret\nsession_id: abc123\n",
+            ("alice", "tiny-secret"),
+            "session_id: abc123",
+        ),
+        (
+            "private_key:\n  tiny-secret\nfoo: bar\n",
+            ("tiny-secret",),
+            "foo: bar",
+        ),
     ],
 )
-def test_diagnostics_redacts_registered_sensitive_names_in_structured_assignments(
+def test_diagnostics_redacts_indented_blocks_under_empty_sensitive_yaml_fields(
     text: str,
-    expected: str,
+    secret_values: tuple[str, ...],
+    preserved: str,
 ) -> None:
     redacted = redact_diagnostic_text(text, limit=1000)
 
+    for secret in secret_values:
+        assert secret not in redacted
+    assert "<redacted>" in redacted
+    assert preserved in redacted
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "preserved"),
+    [
+        (
+            '{"AIHUBMIX_KEY":"json-short","session_id":"json123"}',
+            "json-short",
+            '"session_id":"json123"',
+        ),
+        (
+            '{"DINGTALK_APP_KEY":"ding-short","session_id":"ding123"}',
+            "ding-short",
+            '"session_id":"ding123"',
+        ),
+        (
+            "WECOM_ENCODING_AES_KEY: wecom-short\nsession_id: wecom123\n",
+            "wecom-short",
+            "session_id: wecom123",
+        ),
+        (
+            "PUSHOVER_USER_KEY: push-short\nsession_id: push123\n",
+            "push-short",
+            "session_id: push123",
+        ),
+        (
+            '{"NTFY_URL":"private-topic","session_id":"ntfy123"}',
+            "private-topic",
+            '"session_id":"ntfy123"',
+        ),
+    ],
+)
+def test_diagnostics_applies_registered_sensitive_names_to_structured_fields(
+    text: str,
+    secret: str,
+    preserved: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert secret not in redacted
+    assert "<redacted>" in redacted
+    assert preserved in redacted
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    sorted(
+        local_cli_backend_module._SENSITIVE_ENV_EXACT_NAMES
+        | local_cli_backend_module._registered_sensitive_env_exact_names()
+    ),
+)
+def test_all_registered_sensitive_exact_names_are_redacted_in_json(
+    field_name: str,
+) -> None:
+    redacted = redact_diagnostic_text(
+        json.dumps({field_name: "tinyZ9", "session_id": "json123"}),
+        limit=1000,
+    )
+
     assert "tinyZ9" not in redacted
-    assert "tiny-one" not in redacted
-    assert "tiny-two" not in redacted
-    assert expected in redacted
+    assert '"session_id": "json123"' in redacted
 
 
 def test_diagnostics_redacts_ansi_prefixed_sensitive_fields() -> None:
@@ -2088,6 +2162,35 @@ raise SystemExit(2)
     assert "tiny-secret" not in stderr_preview
     assert "api_keys: <redacted> token_budget: 1000" in stdout_preview
     assert '{"credentials":<redacted>,"session_id":"nested123"}' in stderr_preview
+
+
+def test_nonzero_exit_previews_redact_empty_yaml_blocks_and_registered_fields(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("api_keys:\\n  - tiny-one\\n  - tiny-two\\nsession_id: yaml123")
+print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
+print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stdout_preview = exc_info.value.details["stdout_preview"]
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    for secret in ("tiny-one", "tiny-two", "json-short", "yaml-short"):
+        assert secret not in f"{stdout_preview}\n{stderr_preview}"
+    assert "api_keys: <redacted>" in stdout_preview
+    assert "session_id: yaml123" in stdout_preview
+    assert '{"AIHUBMIX_KEY":"<redacted>","session_id":"json123"}' in stderr_preview
+    assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
+    assert "session_id: wecom123" in stderr_preview
 
 
 def test_nonzero_exit_diagnostic_previews_redact_repo_env_json_and_parameterized_auth(

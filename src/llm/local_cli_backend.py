@@ -549,8 +549,11 @@ def _is_sensitive_diagnostic_field_name(name: str) -> bool:
 
 
 def _is_sensitive_structured_assignment_name(name: str) -> bool:
-    return _is_sensitive_diagnostic_field_name(name) or str(name or "").upper() in (
-        _registered_sensitive_env_exact_names()
+    exact_name = _normalize_diagnostic_field_name(name).upper()
+    return (
+        _is_sensitive_diagnostic_field_name(name)
+        or exact_name in _SENSITIVE_ENV_EXACT_NAMES
+        or exact_name in _registered_sensitive_env_exact_names()
     )
 
 
