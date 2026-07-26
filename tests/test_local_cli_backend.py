@@ -1654,6 +1654,7 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ("MYOPENAIKEY=short", "short"),
         ("OPENAI_V2_API_KEY=short", "short"),
         (r"OPENAI_FOO=\ tiny-secret session_id=ok", "tiny-secret"),
+        ("OPENAI_API_KEY=\\\ntiny-secret session_id=ok", "tiny-secret"),
         ("PUSHOVER_USER_KEY=short", "short"),
         ("R2_SECRET_ACCESS_KEY=short", "short"),
         ("My_Api_Key=myvalue", "myvalue"),
@@ -1787,6 +1788,21 @@ def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
         (
             "- ? credentials\n  :\n  - tiny-one\n  - tiny-two\nsession_id: yaml123\n",
             ("tiny-one", "tiny-two"),
+            "session_id: yaml123",
+        ),
+        (
+            "? api_key\n# note\n: tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+        (
+            "? api_key\n  # note\n: tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+        (
+            "? api_key\n\n: tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
             "session_id: yaml123",
         ),
     ],
@@ -2538,8 +2554,10 @@ print("OPENAI_API_KEY+=appended-secret session_id=append123", file=sys.stderr)
 print("{'api_key': 'single-quoted', 'session_id': 'single123'}", file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 print("OPENAI_FOO=\\\\ shell-short session_id=shell123", file=sys.stderr)
+print("OPENAI_API_KEY=\\\\\\ncontinued-shell-secret session_id=shell456", file=sys.stderr)
 print("API Key: label-short session_id=label123", file=sys.stderr)
 print("OpenAI API Keys (Multi): title-short session_id=title123", file=sys.stderr)
+print("? api_key\\n# note\\n: commented-explicit-secret\\nsession_id: explicit456", file=sys.stderr)
 raise SystemExit(2)
 """,
     )
@@ -2578,8 +2596,10 @@ raise SystemExit(2)
         "single-quoted",
         "yaml-short",
         "shell-short",
+        "continued-shell-secret",
         "label-short",
         "title-short",
+        "commented-explicit-secret",
     ):
         assert secret not in f"{stdout_preview}\n{stderr_preview}"
     assert "api_keys: <redacted>" in stdout_preview
@@ -2607,8 +2627,31 @@ raise SystemExit(2)
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview
     assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview
+    assert "OPENAI_API_KEY=<redacted> session_id=shell456" in stderr_preview
     assert "API Key: <redacted>" in stderr_preview
     assert "OpenAI API Keys (Multi): <redacted>" in stderr_preview
+    assert "? api_key\n: <redacted>\nsession_id: explicit456" in stderr_preview
+
+
+def test_nonzero_exit_previews_redact_explicit_yaml_with_indented_comment(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("? api_key\\n  # indented note\\n: indented-explicit-secret\\nsession_id: explicit789", file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    stderr_preview = exc_info.value.details["stderr_preview"]
+
+    assert "indented-explicit-secret" not in stderr_preview
+    assert "? api_key\n: <redacted>\nsession_id: explicit789" in stderr_preview
 
 
 def test_nonzero_exit_previews_redact_tagged_and_yaml_escaped_explicit_keys(

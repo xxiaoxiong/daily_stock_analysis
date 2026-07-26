@@ -242,6 +242,8 @@ _DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN = r"""
             |
             '(?:''|\\.|[^'\\])*'
             |
+            \\\r?\n[ \t]*
+            |
             \\[^\r\n]
             |
             [^\s,;}\]"']
@@ -1153,14 +1155,29 @@ def _redact_yaml_explicit_sensitive_fields(text: str) -> str:
         if (
             key_match is None
             or not _is_field_specific_sensitive_redaction_target(key_name)
-            or index + 1 >= len(lines)
         ):
             redacted_lines.append(key_line)
             index += 1
             continue
 
-        value_line = lines[index + 1]
         base_indent = len(key_match.group("indent")) + len(key_match.group("sequence_prefix") or "")
+        value_index = index + 1
+        while value_index < len(lines):
+            candidate_line = lines[value_index]
+            candidate_stripped = candidate_line.strip()
+            if not candidate_stripped:
+                value_index += 1
+                continue
+            if candidate_line[_leading_space_count(candidate_line):].startswith("#"):
+                value_index += 1
+                continue
+            break
+        if value_index >= len(lines):
+            redacted_lines.append(key_line)
+            index += 1
+            continue
+
+        value_line = lines[value_index]
         value_indent = _leading_space_count(value_line)
         value_content = value_line[value_indent:].rstrip("\r\n")
         if (
@@ -1184,8 +1201,11 @@ def _redact_yaml_explicit_sensitive_fields(text: str) -> str:
         )
         value = value_content[1:].lstrip(" \t")
         redacted_lines.append(key_line)
+        for skipped_line in lines[index + 1:value_index]:
+            if not skipped_line.strip():
+                redacted_lines.append(skipped_line)
         redacted_lines.append(f"{' ' * value_indent}: <redacted>{newline}")
-        index += 2
+        index = value_index + 1
         allows_indentless_sequence = _yaml_value_allows_indentless_sequence(value)
 
         while index < len(lines):
