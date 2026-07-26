@@ -2270,6 +2270,50 @@ def test_diagnostics_redacts_single_line_multiword_plain_scalar_under_double_quo
     assert redacted == '"password": <redacted>\nsession_id: abc123\n'
 
 
+def test_diagnostics_redacts_tagged_plain_scalar_under_double_quoted_yaml_key() -> None:
+    redacted = redact_diagnostic_text(
+        '!!str "password": correct horse battery staple\nsession_id: ok\n',
+        limit=1000,
+    )
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == '!!str "password": <redacted>\nsession_id: ok\n'
+
+
+def test_diagnostics_redacts_anchored_continued_plain_scalar_under_double_quoted_yaml_key() -> None:
+    redacted = redact_diagnostic_text(
+        '&pem "password": correct horse\n battery staple\nsession_id: ok\n',
+        limit=1000,
+    )
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == '&pem "password": <redacted>\nsession_id: ok\n'
+
+
+def test_diagnostics_redacts_tagged_uri_plain_scalar_under_double_quoted_yaml_key() -> None:
+    redacted = redact_diagnostic_text(
+        '!<tag:yaml.org,2002:str> "password": correct horse battery staple\nsession_id: ok\n',
+        limit=1000,
+    )
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == '!<tag:yaml.org,2002:str> "password": <redacted>\nsession_id: ok\n'
+
+
+def test_diagnostics_redacts_tagged_uri_continued_plain_scalar_under_double_quoted_yaml_key() -> None:
+    redacted = redact_diagnostic_text(
+        '!<tag:yaml.org,2002:str> "password": correct horse\n battery staple\nsession_id: ok\n',
+        limit=1000,
+    )
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == '!<tag:yaml.org,2002:str> "password": <redacted>\nsession_id: ok\n'
+
+
 def test_diagnostics_redacts_indentless_sequence_under_double_quoted_yaml_key() -> None:
     redacted = redact_diagnostic_text(
         '"password": # configured\n- tiny-one\n- tiny-two\nsession_id: abc123\n',

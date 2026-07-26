@@ -340,6 +340,7 @@ def _diagnostic_double_quoted_yaml_line_pattern() -> re.Pattern[str]:
         ^
         (?P<indent>[ ]*)
         (?P<sequence_prefix>-[ \t]+)?
+        (?P<node_properties>(?:(?:!(?:<[^>\r\n]+>|[^ \t\r\n]*)?|&[^ \t\r\n]+)[ \t]+)*)
         "
         (?P<name>(?:\\.|[^"\\])*)
         "
@@ -1036,13 +1037,13 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
     index = 0
     while index < len(lines):
         line = lines[index]
+        quoted_yaml_redaction = _redact_double_quoted_yaml_sensitive_field(lines, index)
+        if quoted_yaml_redaction is not None:
+            kept_lines, index = quoted_yaml_redaction
+            redacted_lines.extend(kept_lines)
+            continue
+
         matches = list(_diagnostic_line_field_pattern().finditer(line))
-        if not matches:
-            quoted_yaml_redaction = _redact_double_quoted_yaml_sensitive_field(lines, index)
-            if quoted_yaml_redaction is not None:
-                kept_lines, index = quoted_yaml_redaction
-                redacted_lines.extend(kept_lines)
-                continue
         if not matches:
             redacted_lines.append(line)
             index += 1
