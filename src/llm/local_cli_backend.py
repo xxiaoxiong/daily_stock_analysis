@@ -339,9 +339,14 @@ def _diagnostic_yaml_explicit_key_pattern() -> re.Pattern[str]:
         (?P<indent>[ ]*)
         (?P<sequence_prefix>-[ \t]+)?
         \?[ \t]+
-        (?P<name_quote>['"]?)
-        (?P<name>{_diagnostic_field_name_pattern()})
-        (?P=name_quote)
+        (?P<node_properties>(?:(?:!(?:<[^>\r\n]+>|[^ \t\r\n]*)?|&[^ \t\r\n]+)[ \t]+)*)
+        (?P<name_token>
+            "(?:\\.|[^"\\])*"
+            |
+            '(?:''|[^'])*'
+            |
+            [^\r\n#]+?
+        )
         [ \t]*(?:\#.*)?
         \r?\n?
         $
@@ -614,16 +619,79 @@ def _normalize_diagnostic_field_name(name: str) -> str:
     return normalized.lower()
 
 
-def _decode_diagnostic_json_field_name(name: str) -> str:
-    """Decode JSON escapes in a key before applying the sensitive-name contract."""
+def _decode_diagnostic_double_quoted_field_name(name: str) -> str:
+    """Decode YAML/JSON double-quoted escapes before applying name matching."""
 
     if "\\" not in name:
         return name
-    try:
-        decoded = json.loads(f'"{name}"')
-    except (TypeError, ValueError):
+
+    simple_escapes = {
+        "0": "\0",
+        "a": "\a",
+        "b": "\b",
+        "t": "\t",
+        "\t": "\t",
+        "n": "\n",
+        "v": "\v",
+        "f": "\f",
+        "r": "\r",
+        "e": "\x1b",
+        " ": " ",
+        '"': '"',
+        "/": "/",
+        "\\": "\\",
+        "N": "\x85",
+        "_": "\xa0",
+        "L": "\u2028",
+        "P": "\u2029",
+    }
+    decoded = []
+    index = 0
+    while index < len(name):
+        char = name[index]
+        if char != "\\":
+            decoded.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(name):
+            return name
+        escape = name[index + 1]
+        if escape in simple_escapes:
+            decoded.append(simple_escapes[escape])
+            index += 2
+            continue
+        if escape in {"x", "u", "U"}:
+            widths = {"x": 2, "u": 4, "U": 8}
+            width = widths[escape]
+            digits = name[index + 2:index + 2 + width]
+            if len(digits) != width or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
+                return name
+            try:
+                decoded.append(chr(int(digits, 16)))
+            except ValueError:
+                return name
+            index += 2 + width
+            continue
+        if escape in {"\n", "\r"}:
+            index += 2
+            if escape == "\r" and index < len(name) and name[index] == "\n":
+                index += 1
+            while index < len(name) and name[index] in {" ", "\t"}:
+                index += 1
+            continue
         return name
-    return decoded if isinstance(decoded, str) else name
+    return "".join(decoded)
+
+
+def _decode_diagnostic_yaml_field_name(name_token: str) -> str:
+    """Decode a YAML key token to its logical field name."""
+
+    token = str(name_token or "")
+    if len(token) >= 2 and token[0] == token[-1] == '"':
+        return _decode_diagnostic_double_quoted_field_name(token[1:-1])
+    if len(token) >= 2 and token[0] == token[-1] == "'":
+        return token[1:-1].replace("''", "'")
+    return token.strip()
 
 
 def _is_sensitive_diagnostic_field_name(name: str) -> bool:
@@ -771,7 +839,7 @@ def _redact_sensitive_collection_assignments(text: str) -> str:
         redacted,
         _diagnostic_json_assignment_pattern(),
         lambda name: _is_sensitive_structured_assignment_name(
-            _decode_diagnostic_json_field_name(name)
+            _decode_diagnostic_double_quoted_field_name(name)
         ),
     )
     return replace_matches(
@@ -920,9 +988,14 @@ def _redact_yaml_explicit_sensitive_fields(text: str) -> str:
     while index < len(lines):
         key_line = lines[index]
         key_match = _diagnostic_yaml_explicit_key_pattern().match(key_line)
+        key_name = (
+            _decode_diagnostic_yaml_field_name(key_match.group("name_token"))
+            if key_match is not None
+            else ""
+        )
         if (
             key_match is None
-            or not _is_field_specific_sensitive_redaction_target(key_match.group("name"))
+            or not _is_field_specific_sensitive_redaction_target(key_name)
             or index + 1 >= len(lines)
         ):
             redacted_lines.append(key_line)
@@ -1005,7 +1078,7 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
         lambda match: (
             _redact_assignment_value(match)
             if _is_sensitive_structured_assignment_name(
-                _decode_diagnostic_json_field_name(match.group("name"))
+                _decode_diagnostic_double_quoted_field_name(match.group("name"))
             )
             else match.group(0)
         ),

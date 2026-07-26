@@ -1679,6 +1679,7 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ('{"db_passwd":"tiny-secret"}', "tiny-secret"),
         ('{"set-cookie":"session=tiny-secret"}', "tiny-secret"),
         (r'{"api\u005fkey":"tiny-secret"}', "tiny-secret"),
+        (r'{"api\x5fkey":"tiny-secret"}', "tiny-secret"),
         ("OPENAI_API_KEY='x'\"'\"'tiny-secret' session_id=ok", "tiny-secret"),
         ("OPENAI_API_KEY+=tiny-secret session_id=ok", "tiny-secret"),
         ("{'api_key': 'tiny-secret', 'session_id': 'ok'}", "tiny-secret"),
@@ -1754,6 +1755,11 @@ def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
             "session_id: yaml123",
         ),
         (
+            '? "api\\x5fkey"\n: tiny-secret\nsession_id: yaml123\n',
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+        (
             "? credentials\n:\n- tiny-one\n- tiny-two\nsession_id: yaml123\n",
             ("tiny-one", "tiny-two"),
             "session_id: yaml123",
@@ -1765,6 +1771,16 @@ def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
         ),
         (
             "- ? api_key\n  : tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+        (
+            "? !!str api_key\n: tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+        (
+            "- ? &cred private_key\n  : tiny-secret\nsession_id: yaml123\n",
             ("tiny-secret",),
             "session_id: yaml123",
         ),
@@ -2509,6 +2525,36 @@ raise SystemExit(2)
     assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview
     assert "API Key: <redacted>" in stderr_preview
     assert "OpenAI API Keys (Multi): <redacted>" in stderr_preview
+
+
+def test_nonzero_exit_previews_redact_tagged_and_yaml_escaped_explicit_keys(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print('{"api\\\\x5fkey":"escaped-hex-json","session_id":"escapedhex123"}', file=sys.stderr)
+print("? !!str api_key\\n: tagged-explicit-secret\\nsession_id: tagged-explicit123", file=sys.stderr)
+print('- ? &cred "api\\\\x5fkey"\\n  : anchored-escaped-secret\\nsession_id: anchored-explicit123', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert "escaped-hex-json" not in stderr_preview
+    assert "tagged-explicit-secret" not in stderr_preview
+    assert "anchored-escaped-secret" not in stderr_preview
+    assert r'{"api\x5fkey":"<redacted>","session_id":"escapedhex123"}' in stderr_preview
+    assert "? !!str api_key\n: <redacted>\nsession_id: tagged-explicit123" in stderr_preview
+    assert (
+        '- ? &cred "api\\x5fkey"\n  : <redacted>\nsession_id: anchored-explicit123'
+        in stderr_preview
+    )
 
 
 def test_nonzero_exit_diagnostic_previews_redact_repo_env_json_and_parameterized_auth(
