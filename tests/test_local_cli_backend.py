@@ -1645,6 +1645,8 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ("API Key: tiny-secret session_id=ok", "tiny-secret"),
         ("Client Secret: tiny-secret session_id=ok", "tiny-secret"),
         ("Secret Access Key: tiny-secret session_id=ok", "tiny-secret"),
+        ("DingTalk App Key: tiny-secret session_id=ok", "tiny-secret"),
+        ("Pushover User Key: tiny-secret session_id=ok", "tiny-secret"),
         ('{"Database URL":"tiny-secret","session_id":"ok"}', "tiny-secret"),
         ("PASSWORD='abc def ghi' next", "abc def ghi"),
         ("SESSION_SECRET='abc def ghi' next", "abc def ghi"),
@@ -1911,6 +1913,24 @@ def test_all_registered_sensitive_exact_names_are_redacted_in_json(
 
     assert "tinyZ9" not in redacted
     assert '"session_id": "json123"' in redacted
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    sorted(local_cli_backend_module._registered_sensitive_env_exact_names()),
+)
+def test_all_registered_sensitive_exact_names_are_redacted_as_spaced_labels(
+    field_name: str,
+) -> None:
+    label = field_name.replace("_", " ")
+
+    redacted = redact_diagnostic_text(
+        f"{label}: tinyZ9 session_id=label123",
+        limit=1000,
+    )
+
+    assert "tinyZ9" not in redacted
+    assert "<redacted>" in redacted
 
 
 def test_diagnostics_redacts_ansi_prefixed_sensitive_fields() -> None:

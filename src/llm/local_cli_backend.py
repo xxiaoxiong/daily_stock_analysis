@@ -233,18 +233,6 @@ _DIGEST_AUTH_PARAM_NAMES = frozenset({
     "userhash",
     "username",
 })
-_DIAGNOSTIC_SPACED_SENSITIVE_FIELD_PATTERN = "|".join(
-    re.escape(name).replace("_", r"[ \t]+")
-    for name in sorted(
-        (name for name in _SENSITIVE_DIAGNOSTIC_FIELDS if "_" in name),
-        key=len,
-        reverse=True,
-    )
-)
-_DIAGNOSTIC_FIELD_NAME_PATTERN = (
-    rf"(?:(?i:{_DIAGNOSTIC_SPACED_SENSITIVE_FIELD_PATTERN})|"
-    r"[A-Za-z][A-Za-z0-9_-]*)"
-)
 _DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN = r"""
     (?P<value>
         "(?:\\.|[^"\\])*"
@@ -254,6 +242,78 @@ _DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN = r"""
         (?:\\[^\r\n]|[^\s,;}\]])+
     )
 """
+
+
+@lru_cache(maxsize=1)
+def _diagnostic_field_name_pattern() -> str:
+    """Build field syntax after the lazy config registry can be imported safely."""
+
+    sensitive_names = (
+        {name.upper() for name in _SENSITIVE_DIAGNOSTIC_FIELDS}
+        | _SENSITIVE_ENV_EXACT_NAMES
+        | _registered_sensitive_env_exact_names()
+    )
+    spaced_sensitive_names = "|".join(
+        re.escape(name).replace("_", r"[ \t]+")
+        for name in sorted(
+            (name for name in sensitive_names if "_" in name),
+            key=len,
+            reverse=True,
+        )
+    )
+    return (
+        rf"(?:(?i:{spaced_sensitive_names})|"
+        r"[A-Za-z][A-Za-z0-9_-]*)"
+    )
+
+
+@lru_cache(maxsize=1)
+def _diagnostic_field_assignment_pattern() -> re.Pattern[str]:
+    return re.compile(
+        rf"""
+        (?<![A-Za-z0-9_-])
+        (?P<name>{_diagnostic_field_name_pattern()})
+        (?P<separator>[ \t]*(?:=|:)[ \t]*)
+        {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
+        """,
+        re.VERBOSE,
+    )
+
+
+@lru_cache(maxsize=1)
+def _diagnostic_json_assignment_pattern() -> re.Pattern[str]:
+    return re.compile(
+        rf"""
+        (?P<key_quote>["'])
+        (?P<name>{_diagnostic_field_name_pattern()})
+        (?P=key_quote)
+        (?P<separator>[ \t\r\n]*:[ \t\r\n]*)
+        {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
+        """,
+        re.VERBOSE,
+    )
+
+
+@lru_cache(maxsize=1)
+def _diagnostic_line_field_pattern() -> re.Pattern[str]:
+    field_name_pattern = _diagnostic_field_name_pattern()
+    return re.compile(
+        rf"""
+        (?<![A-Za-z0-9_-])
+        (?P<name>{field_name_pattern})
+        (?P<separator>[ \t]*(?:=|:)[ \t]*)
+        (?P<value>[^\r\n]*?)
+        (?=
+            (?:(?:[,;][ \t]*)|[ \t]+){field_name_pattern}[ \t]*(?:=|:)[ \t]*
+            |
+            \r?\n?
+            $
+        )
+        """,
+        re.VERBOSE,
+    )
+
+
 _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
     rf"""
     (?<![A-Za-z0-9_])
@@ -261,40 +321,6 @@ _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
     (?P<name>[A-Z][A-Z0-9_]*)
     (?P<separator>[ \t]*=[ \t]*)
     {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
-    """,
-    re.VERBOSE,
-)
-_DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN = re.compile(
-    rf"""
-    (?<![A-Za-z0-9_-])
-    (?P<name>{_DIAGNOSTIC_FIELD_NAME_PATTERN})
-    (?P<separator>[ \t]*(?:=|:)[ \t]*)
-    {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
-    """,
-    re.VERBOSE,
-)
-_DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN = re.compile(
-    rf"""
-    (?P<key_quote>["'])
-    (?P<name>{_DIAGNOSTIC_FIELD_NAME_PATTERN})
-    (?P=key_quote)
-    (?P<separator>[ \t\r\n]*:[ \t\r\n]*)
-    {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
-    """,
-    re.VERBOSE,
-)
-_DIAGNOSTIC_LINE_FIELD_PATTERN = re.compile(
-    rf"""
-    (?<![A-Za-z0-9_-])
-    (?P<name>{_DIAGNOSTIC_FIELD_NAME_PATTERN})
-    (?P<separator>[ \t]*(?:=|:)[ \t]*)
-    (?P<value>[^\r\n]*?)
-    (?=
-        (?:(?:[,;][ \t]*)|[ \t]+){_DIAGNOSTIC_FIELD_NAME_PATTERN}[ \t]*(?:=|:)[ \t]*
-        |
-        \r?\n?
-        $
-    )
     """,
     re.VERBOSE,
 )
@@ -560,12 +586,26 @@ def _is_sensitive_diagnostic_field_name(name: str) -> bool:
     )
 
 
+@lru_cache(maxsize=1)
+def _sensitive_exact_diagnostic_field_names() -> frozenset[str]:
+    return _SENSITIVE_ENV_EXACT_NAMES | _registered_sensitive_env_exact_names()
+
+
+@lru_cache(maxsize=1)
+def _compact_sensitive_exact_diagnostic_field_names() -> frozenset[str]:
+    return frozenset(
+        re.sub(r"[-_ \t]+", "", name)
+        for name in _sensitive_exact_diagnostic_field_names()
+    )
+
+
 def _is_sensitive_structured_assignment_name(name: str) -> bool:
     exact_name = _normalize_diagnostic_field_name(name).upper()
+    compact_name = re.sub(r"[-_ \t]+", "", str(name or "")).upper()
     return (
         _is_sensitive_diagnostic_field_name(name)
-        or exact_name in _SENSITIVE_ENV_EXACT_NAMES
-        or exact_name in _registered_sensitive_env_exact_names()
+        or exact_name in _sensitive_exact_diagnostic_field_names()
+        or compact_name in _compact_sensitive_exact_diagnostic_field_names()
     )
 
 
@@ -641,12 +681,12 @@ def _redact_sensitive_collection_assignments(text: str) -> str:
     redacted = replace_matches(text, _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN, _is_sensitive_env_name)
     redacted = replace_matches(
         redacted,
-        _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN,
+        _diagnostic_json_assignment_pattern(),
         _is_sensitive_structured_assignment_name,
     )
     return replace_matches(
         redacted,
-        _DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN,
+        _diagnostic_field_assignment_pattern(),
         _is_field_specific_sensitive_redaction_target,
     )
 
@@ -662,7 +702,7 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
     index = 0
     while index < len(lines):
         line = lines[index]
-        matches = list(_DIAGNOSTIC_LINE_FIELD_PATTERN.finditer(line))
+        matches = list(_diagnostic_line_field_pattern().finditer(line))
         if not matches:
             redacted_lines.append(line)
             index += 1
@@ -797,7 +837,7 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
     redacted = _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN.sub(redact_env, text)
     redacted = _redact_sensitive_collection_assignments(redacted)
     redacted = _redact_multiline_sensitive_fields(redacted)
-    redacted = _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN.sub(
+    redacted = _diagnostic_json_assignment_pattern().sub(
         lambda match: (
             _redact_assignment_value(match)
             if _is_sensitive_structured_assignment_name(match.group("name"))
@@ -805,7 +845,7 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
         ),
         redacted,
     )
-    return _DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN.sub(redact_structured_field, redacted)
+    return _diagnostic_field_assignment_pattern().sub(redact_structured_field, redacted)
 
 
 def _has_closed_diagnostic_quote(value: str, quote: str) -> bool:
