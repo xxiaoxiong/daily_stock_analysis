@@ -294,7 +294,7 @@ _AUTHORIZATION_FIELD_PATTERN = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
-_YAML_BLOCK_SCALAR_PATTERN = re.compile(r"^[|>][0-9+-]*[ \t]*(?:#.*)?$")
+_YAML_BLOCK_SCALAR_PATTERN = re.compile(r"^[|>][0-9+-]*$")
 _CLAUDE_CODE_STATIC_INSTRUCTION = (
     "Generate the requested DSA analysis output from stdin. "
     "Return only the final response content. Do not call tools, read files, "
@@ -561,16 +561,30 @@ def _leading_space_count(text: str) -> int:
     return len(text) - len(text.lstrip(" "))
 
 
-def _is_yaml_block_scalar(value: str) -> bool:
-    return bool(_YAML_BLOCK_SCALAR_PATTERN.match(value.strip()))
+def _is_yaml_block_value(value: str) -> bool:
+    """Return whether a YAML value introduces content on following lines."""
+
+    stripped = value.strip()
+    if not stripped or stripped.startswith("#"):
+        return True
+
+    tokens = stripped.split()
+    while tokens and tokens[0].startswith(("!", "&")):
+        tokens.pop(0)
+    if not tokens or tokens[0].startswith("#"):
+        return True
+    if not _YAML_BLOCK_SCALAR_PATTERN.match(tokens[0]):
+        return False
+    return len(tokens) == 1 or tokens[1].startswith("#")
 
 
-def _is_yaml_comment_only_value(value: str) -> bool:
-    return value.lstrip().startswith("#")
+def _yaml_value_allows_indentless_sequence(value: str) -> bool:
+    """Return whether a following same-indent sequence belongs to this value."""
 
-
-def _is_yaml_comment_only_line(line: str) -> bool:
-    return line.lstrip().startswith("#")
+    tokens = value.strip().split()
+    while tokens and tokens[0].startswith(("!", "&")):
+        tokens.pop(0)
+    return not tokens or tokens[0].startswith("#")
 
 
 def _replace_spans(text: str, replacements: Sequence[Tuple[int, int, str]]) -> str:
@@ -641,20 +655,16 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
 
             value = match.group("value")
             stripped_value = value.strip()
-            if ":" in match.group("separator") and (
-                not stripped_value or _is_yaml_comment_only_value(value)
-            ):
+            if ":" in match.group("separator") and _is_yaml_block_value(value):
                 replacement = "<redacted>"
                 if not match.group("separator")[-1:].isspace():
                     replacement = f" {replacement}"
                 replacements.append((match.start("value"), match.end("value"), replacement))
                 block_match = block_match or match
-                block_allows_indentless_sequence = True
-                continue
-
-            if _is_yaml_block_scalar(value):
-                replacements.append((match.start("value"), match.end("value"), "<redacted>"))
-                block_match = block_match or match
+                block_allows_indentless_sequence = (
+                    block_allows_indentless_sequence
+                    or _yaml_value_allows_indentless_sequence(value)
+                )
                 continue
 
             if stripped_value[:1] in {"'", '"'} and not _has_closed_diagnostic_quote(
@@ -691,20 +701,22 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
             base_indent = _leading_space_count(line)
             while index < len(lines):
                 next_line = lines[index]
-                next_line_indent = _leading_space_count(next_line)
-                is_comment_only_line = _is_yaml_comment_only_line(next_line)
-                is_indentless_sequence_entry = (
-                    block_allows_indentless_sequence
-                    and next_line_indent == base_indent
-                    and next_line.lstrip().startswith("-")
-                )
-                if (
-                    next_line.strip()
-                    and not is_comment_only_line
-                    and next_line_indent <= base_indent
-                    and not is_indentless_sequence_entry
-                ):
-                    break
+                stripped_next_line = next_line.strip()
+                next_indent = _leading_space_count(next_line)
+                if stripped_next_line and next_indent <= base_indent:
+                    is_same_indent_comment = (
+                        next_indent == base_indent and stripped_next_line.startswith("#")
+                    )
+                    is_indentless_sequence = (
+                        block_allows_indentless_sequence
+                        and next_indent == base_indent
+                        and (
+                            stripped_next_line == "-"
+                            or stripped_next_line.startswith("- ")
+                        )
+                    )
+                    if not is_same_indent_comment and not is_indentless_sequence:
+                        break
                 if not next_line.strip():
                     redacted_lines.append(next_line)
                 index += 1

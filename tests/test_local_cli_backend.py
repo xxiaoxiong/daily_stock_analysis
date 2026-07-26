@@ -1763,6 +1763,26 @@ def test_diagnostics_redacts_sensitive_collections() -> None:
             ("tiny-secret",),
             "foo: bar",
         ),
+        (
+            "api_keys: # configured keys\n  - tiny-one\nsession_id: abc123\n",
+            ("tiny-one",),
+            "session_id: abc123",
+        ),
+        (
+            "api_keys:\n- tiny-one\n- tiny-two\nsession_id: abc123\n",
+            ("tiny-one", "tiny-two"),
+            "session_id: abc123",
+        ),
+        (
+            "private_key: &pem |\n  tiny-secret\nsession_id: abc123\n",
+            ("tiny-secret",),
+            "session_id: abc123",
+        ),
+        (
+            "credentials: !vault &creds\n  value: tiny-secret\nsession_id: abc123\n",
+            ("tiny-secret",),
+            "session_id: abc123",
+        ),
     ],
 )
 def test_diagnostics_redacts_indented_blocks_under_empty_sensitive_yaml_fields(
@@ -2206,6 +2226,7 @@ def test_nonzero_exit_previews_redact_empty_yaml_blocks_and_registered_fields(
 import sys
 print("api_keys:\\n  - tiny-one\\n  - tiny-two\\nsession_id: yaml123")
 print("api_keys: # configured keys\\n# nested note\\n- stdout-short\\n- stdout-short-2\\nsession_id: yaml456")
+print("private_key: &pem |\\n  anchored-secret\\nsession_id: anchor123")
 print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 raise SystemExit(2)
@@ -2224,6 +2245,7 @@ raise SystemExit(2)
         "nested note",
         "stdout-short",
         "stdout-short-2",
+        "anchored-secret",
         "json-short",
         "yaml-short",
     ):
@@ -2231,6 +2253,8 @@ raise SystemExit(2)
     assert "api_keys: <redacted>" in stdout_preview
     assert "session_id: yaml123" in stdout_preview
     assert "session_id: yaml456" in stdout_preview
+    assert "private_key: <redacted>" in stdout_preview
+    assert "session_id: anchor123" in stdout_preview
     assert '{"AIHUBMIX_KEY":"<redacted>","session_id":"json123"}' in stderr_preview
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview
