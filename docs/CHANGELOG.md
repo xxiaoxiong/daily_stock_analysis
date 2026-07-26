@@ -57,17 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### 文档
 
 - 修复文档中的失效相对链接。
-- [修复] #2026 外股代码映射到中文显示名时英文新闻相关性判定漏判：新增同源 STOCK_ENGLISH_NAME_MAP 单一真源、canonicalize_foreign_stock_code 规范化入口与 _foreign_english_query_terms 别名解析，使 AAPL/00700/BABA 等 ticker 即使 stock_name 为中文也能在查询构建、相关性打分与多维度情报路径上复用 canonical 英文名，并补齐 .US/.HK suffix / HK 前缀全形式的归类与回归用例；同时在 _score_news_relevance 对 alias 展开 term 做去重，避免 legal alias 展开短名与显式 short alias 重复计分。
-- [新功能] Tushare 数据源支持通过 `TUSHARE_HTTP_URL` 环境变量自定义接入地址，便于网络无法直达 `api.tushare.pro` 时切换自建网关或第三方兼容镜像；留空保持官方默认地址不变（fixes #1985）
-- [文档] `.env.example` 与 `.github/workflows/00-daily-analysis.yml` 同步映射 `TUSHARE_HTTP_URL`，避免出现"配置项有但 workflow 漏映射"的半修状态
-- [修复] #2051 PR Review 的特权 `pull_request_target` 流程不再检出 fork PR head：敏感文件、标签、报告与 AI 审查统一通过 GitHub API 将 PR 元数据和 diff 作为数据读取，只执行主分支可信脚本；Python 语法、Flake8、确定性检查和离线测试继续由无 secrets 的 `pull_request` CI / `backend-gate` 执行，兼容 `actions/checkout` 新增的 fork checkout 安全保护。
-- [修复] 修复 Windows 上 mimetypes 冷启动时读取注册表导致的进程卡死
-- [新功能] Web 首页与 `POST /api/v1/analysis/market-review` 支持用严格校验的 `region` 字符串临时选择单个或多个复盘市场；一次性覆盖不读取或修改全局配置，“服务器默认”在任务提交边界解析为 canonical 实际执行市场，并贯穿 accepted 响应、任务状态/列表/SSE、完成态结构化 payload 与 History。
-- [修复] GitHub Actions PR Review 流程中的 `_event_payload()` 此前用 `except (OSError, ValueError): return {}` 把「事件文件缺失」「文件不可读」「JSON 非法」三类异常统一吞成空对象，下游只表现为 `PR number is unavailable` 无法定位根因；现保留空对象降级行为不变，但分别对三类失败输出不含载荷内容的警告（仅含异常类型与 `GITHUB_EVENT_PATH` 源路径），并补齐三类降级路径与「坏载荷导致 PR 编号不可用」链路的回归测试（fixes #2070）
-- [修复] DataFetcherManager 港股路由：4-5 位纯数字裸港股码（如 `02513`、`00700`、`0001`）此前仅 `_is_hk_market` 单侧识别，`AkshareFetcher._is_hk_code` 与 `LongbridgeFetcher._is_hk_code` 内仍只接受 5 位裸数字，导致配置了 Yfinance/Akshare/Longbridge 的港股日线/实时链路对 4 位裸港股码静默失败。本 PR 同步三处 `_is_hk_code` 契约到 4-5 位裸数字，并新增 `DataFetcherManager` 港股路由回归测试，避免上游路由判 HK、下游 provider 不识别的部分调用链断口（fixes #2091）
-- [修复] Web 设置页和通知测试入口补齐普通钉钉群机器人配置，支持安全遮罩地保存 `DINGTALK_WEBHOOK_URL` / `DINGTALK_SECRET`、查看专属帮助并发送钉钉测试通知（refs #1957）。
-- [修复] Agent Chat 普通与流式接口在请求未指定 `report_language` 时继承全局 `REPORT_LANGUAGE`，显式请求值仍保持优先，避免回复语言与报告配置不一致。
-- [修复] AkShare 港股实时行情增加 20 分钟全市场数据缓存与并发冷启动 single-flight，热缓存命中不再执行网络限速等待；主接口返回结构异常时仍保持新浪备用接口降级，避免多港股组合快照重复拉取全市场数据而长时间阻塞（refs #1852）。
 
 ## [3.27.0] - 2026-07-19
 

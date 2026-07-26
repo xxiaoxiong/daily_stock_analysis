@@ -345,7 +345,7 @@ _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
     (?<![A-Za-z0-9_])
     (?P<prefix>(?:export[ \t]+)?)
     (?P<name>[A-Z][A-Z0-9_]*)
-    (?P<separator>[ \t]*=[ \t]*)
+    (?P<separator>[ \t]*\+?=[ \t]*)
     {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
     """,
     re.VERBOSE,
