@@ -237,11 +237,15 @@ _DIGEST_AUTH_PARAM_NAMES = frozenset({
 })
 _DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN = r"""
     (?P<value>
-        "(?:\\.|[^"\\])*"
-        |
-        '(?:''|\\.|[^'\\])*'
-        |
-        (?:\\[^\r\n]|[^\s,;}\]])+
+        (?:
+            "(?:\\.|[^"\\])*"
+            |
+            '(?:''|\\.|[^'\\])*'
+            |
+            \\[^\r\n]
+            |
+            [^\s,;}\]"']
+        )+
     )
 """
 
@@ -311,6 +315,22 @@ def _diagnostic_line_field_pattern() -> re.Pattern[str]:
             \r?\n?
             $
         )
+        """,
+        re.VERBOSE,
+    )
+
+
+@lru_cache(maxsize=1)
+def _diagnostic_yaml_explicit_key_pattern() -> re.Pattern[str]:
+    return re.compile(
+        rf"""
+        ^
+        (?P<indent>[ ]*)
+        \?[ \t]+
+        (?P<name>{_diagnostic_field_name_pattern()})
+        [ \t]*(?:\#.*)?
+        \r?\n?
+        $
         """,
         re.VERBOSE,
     )
@@ -836,6 +856,78 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
     return "".join(redacted_lines)
 
 
+def _redact_yaml_explicit_sensitive_fields(text: str) -> str:
+    """Redact YAML ``? key`` / ``: value`` entries and their continuations."""
+
+    lines = text.splitlines(keepends=True)
+    redacted_lines = []
+    index = 0
+    while index < len(lines):
+        key_line = lines[index]
+        key_match = _diagnostic_yaml_explicit_key_pattern().match(key_line)
+        if (
+            key_match is None
+            or not _is_field_specific_sensitive_redaction_target(key_match.group("name"))
+            or index + 1 >= len(lines)
+        ):
+            redacted_lines.append(key_line)
+            index += 1
+            continue
+
+        value_line = lines[index + 1]
+        base_indent = len(key_match.group("indent"))
+        value_indent = _leading_space_count(value_line)
+        value_content = value_line[value_indent:].rstrip("\r\n")
+        if (
+            value_indent != base_indent
+            or not value_content.startswith(":")
+            or (
+                len(value_content) > 1
+                and value_content[1] not in {" ", "\t"}
+            )
+        ):
+            redacted_lines.append(key_line)
+            index += 1
+            continue
+
+        newline = (
+            "\r\n"
+            if value_line.endswith("\r\n")
+            else "\n"
+            if value_line.endswith("\n")
+            else ""
+        )
+        value = value_content[1:].lstrip(" \t")
+        redacted_lines.append(key_line)
+        redacted_lines.append(f"{' ' * base_indent}: <redacted>{newline}")
+        index += 2
+        allows_indentless_sequence = _yaml_value_allows_indentless_sequence(value)
+
+        while index < len(lines):
+            next_line = lines[index]
+            stripped_next_line = next_line.strip()
+            next_indent = _leading_space_count(next_line)
+            if stripped_next_line and next_indent <= base_indent:
+                is_same_indent_comment = (
+                    next_indent == base_indent and stripped_next_line.startswith("#")
+                )
+                is_indentless_sequence = (
+                    allows_indentless_sequence
+                    and next_indent == base_indent
+                    and (
+                        stripped_next_line == "-"
+                        or stripped_next_line.startswith("- ")
+                    )
+                )
+                if not is_same_indent_comment and not is_indentless_sequence:
+                    break
+            if not stripped_next_line:
+                redacted_lines.append(next_line)
+            index += 1
+
+    return "".join(redacted_lines)
+
+
 def _redact_sensitive_diagnostic_assignments(text: str) -> str:
     """Redact parsed env and structured-field assignments under separate contracts."""
 
@@ -850,7 +942,8 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
             else match.group(0)
         )
 
-    redacted = _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN.sub(redact_env, text)
+    redacted = _redact_yaml_explicit_sensitive_fields(text)
+    redacted = _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN.sub(redact_env, redacted)
     redacted = _redact_sensitive_collection_assignments(redacted)
     redacted = _redact_multiline_sensitive_fields(redacted)
     redacted = _diagnostic_json_assignment_pattern().sub(

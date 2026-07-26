@@ -1664,6 +1664,7 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ('{"db_passwd":"tiny-secret"}', "tiny-secret"),
         ('{"set-cookie":"session=tiny-secret"}', "tiny-secret"),
         (r'{"api\u005fkey":"tiny-secret"}', "tiny-secret"),
+        ("OPENAI_API_KEY='x'\"'\"'tiny-secret' session_id=ok", "tiny-secret"),
     ],
 )
 def test_diagnostics_redacts_short_credential_assignments(text: str, secret: str) -> None:
@@ -1714,6 +1715,39 @@ def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
     text = "Cache Key: shard-one\nSort Key: created-at\nsession_id: ok\n"
 
     assert redact_diagnostic_text(text, limit=1000) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "secrets", "preserved"),
+    [
+        (
+            "? api_key\n: tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+        (
+            "? credentials\n:\n- tiny-one\n- tiny-two\nsession_id: yaml123\n",
+            ("tiny-one", "tiny-two"),
+            "session_id: yaml123",
+        ),
+        (
+            "? private_key\n: |\n  tiny-secret\nsession_id: yaml123\n",
+            ("tiny-secret",),
+            "session_id: yaml123",
+        ),
+    ],
+)
+def test_diagnostics_redacts_yaml_explicit_sensitive_mappings(
+    text: str,
+    secrets: tuple[str, ...],
+    preserved: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    for secret in secrets:
+        assert secret not in redacted
+    assert ": <redacted>" in redacted
+    assert preserved in redacted
 
 
 def test_diagnostics_redacts_indented_values_under_empty_sensitive_yaml_field() -> None:
@@ -2323,6 +2357,8 @@ print('password: !secret "tagged-one\\n  tagged-two"\\nsession_id: tagged-yaml')
 print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
 print('{"set-cookie":"session=cookie-header","session_id":"header123"}', file=sys.stderr)
 print('{"api\\\\u005fkey":"escaped-json","session_id":"escaped123"}', file=sys.stderr)
+print("? api_key\\n: explicit-secret\\nsession_id: explicit123", file=sys.stderr)
+print("OPENAI_API_KEY='x'\\\"'\\\"'shell-quoted' session_id=quoted123", file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 print("OPENAI_FOO=\\\\ shell-short session_id=shell123", file=sys.stderr)
 print("API Key: label-short session_id=label123", file=sys.stderr)
@@ -2352,6 +2388,8 @@ raise SystemExit(2)
         "json-short",
         "cookie-header",
         "escaped-json",
+        "explicit-secret",
+        "shell-quoted",
         "yaml-short",
         "shell-short",
         "label-short",
@@ -2369,6 +2407,8 @@ raise SystemExit(2)
     assert '{"AIHUBMIX_KEY":"<redacted>","session_id":"json123"}' in stderr_preview
     assert '{"set-cookie":"<redacted>","session_id":"header123"}' in stderr_preview
     assert r'{"api\u005fkey":"<redacted>","session_id":"escaped123"}' in stderr_preview
+    assert "? api_key\n: <redacted>\nsession_id: explicit123" in stderr_preview
+    assert "OPENAI_API_KEY='<redacted>' session_id=quoted123" in stderr_preview
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview
     assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview
