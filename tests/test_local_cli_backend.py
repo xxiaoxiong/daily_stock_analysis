@@ -1665,6 +1665,8 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ('{"set-cookie":"session=tiny-secret"}', "tiny-secret"),
         (r'{"api\u005fkey":"tiny-secret"}', "tiny-secret"),
         ("OPENAI_API_KEY='x'\"'\"'tiny-secret' session_id=ok", "tiny-secret"),
+        ("{'api_key': 'tiny-secret', 'session_id': 'ok'}", "tiny-secret"),
+        ("'password': tiny-secret session_id=ok", "tiny-secret"),
     ],
 )
 def test_diagnostics_redacts_short_credential_assignments(text: str, secret: str) -> None:
@@ -1875,6 +1877,11 @@ def test_diagnostics_redacts_sensitive_collections() -> None:
         (
             "API Key:\n  - tiny-one\n  - tiny-two\nsession_id: abc123\n",
             ("tiny-one", "tiny-two"),
+            "session_id: abc123",
+        ),
+        (
+            "'credentials':\n  username: alice\n  value: tiny-secret\nsession_id: abc123\n",
+            ("alice", "tiny-secret"),
             "session_id: abc123",
         ),
     ],
@@ -2359,6 +2366,7 @@ print('{"set-cookie":"session=cookie-header","session_id":"header123"}', file=sy
 print('{"api\\\\u005fkey":"escaped-json","session_id":"escaped123"}', file=sys.stderr)
 print("? api_key\\n: explicit-secret\\nsession_id: explicit123", file=sys.stderr)
 print("OPENAI_API_KEY='x'\\\"'\\\"'shell-quoted' session_id=quoted123", file=sys.stderr)
+print("{'api_key': 'single-quoted', 'session_id': 'single123'}", file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 print("OPENAI_FOO=\\\\ shell-short session_id=shell123", file=sys.stderr)
 print("API Key: label-short session_id=label123", file=sys.stderr)
@@ -2390,6 +2398,7 @@ raise SystemExit(2)
         "escaped-json",
         "explicit-secret",
         "shell-quoted",
+        "single-quoted",
         "yaml-short",
         "shell-short",
         "label-short",
@@ -2409,6 +2418,7 @@ raise SystemExit(2)
     assert r'{"api\u005fkey":"<redacted>","session_id":"escaped123"}' in stderr_preview
     assert "? api_key\n: <redacted>\nsession_id: explicit123" in stderr_preview
     assert "OPENAI_API_KEY='<redacted>' session_id=quoted123" in stderr_preview
+    assert "{'api_key': '<redacted>', 'session_id': 'single123'}" in stderr_preview
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview
     assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview

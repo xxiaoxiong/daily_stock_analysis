@@ -278,7 +278,9 @@ def _diagnostic_field_assignment_pattern() -> re.Pattern[str]:
     return re.compile(
         rf"""
         (?<![A-Za-z0-9_-])
+        (?P<name_quote>'?)
         (?P<name>{_diagnostic_field_name_pattern()})
+        (?P=name_quote)
         (?P<separator>[ \t]*(?:=|:)[ \t]*)
         {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
         """,
@@ -306,11 +308,13 @@ def _diagnostic_line_field_pattern() -> re.Pattern[str]:
     return re.compile(
         rf"""
         (?<![A-Za-z0-9_-])
+        (?P<name_quote>'?)
         (?P<name>{field_name_pattern})
+        (?P=name_quote)
         (?P<separator>[ \t]*(?:=|:)[ \t]*)
         (?P<value>[^\r\n]*?)
         (?=
-            (?:(?:[,;][ \t]*)|[ \t]+){field_name_pattern}[ \t]*(?:=|:)[ \t]*
+            (?:(?:[,;][ \t]*)|[ \t]+)'?{field_name_pattern}'?[ \t]*(?:=|:)[ \t]*
             |
             \r?\n?
             $
