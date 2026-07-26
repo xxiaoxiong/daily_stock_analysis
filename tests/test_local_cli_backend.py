@@ -1642,6 +1642,10 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ("PUSHOVER_USER_KEY=short", "short"),
         ("R2_SECRET_ACCESS_KEY=short", "short"),
         ("My_Api_Key=myvalue", "myvalue"),
+        ("API Key: tiny-secret session_id=ok", "tiny-secret"),
+        ("Client Secret: tiny-secret session_id=ok", "tiny-secret"),
+        ("Secret Access Key: tiny-secret session_id=ok", "tiny-secret"),
+        ('{"Database URL":"tiny-secret","session_id":"ok"}', "tiny-secret"),
         ("PASSWORD='abc def ghi' next", "abc def ghi"),
         ("SESSION_SECRET='abc def ghi' next", "abc def ghi"),
         ("Authorization: Bearer tiny", "tiny"),
@@ -1685,6 +1689,12 @@ def test_diagnostics_redacts_yaml_scalars_with_spaces_and_blocks() -> None:
     assert "backup_password: '<redacted>'\n" in redacted
     assert "''s secret" not in redacted
     assert "private_key: <redacted>" in redacted
+
+
+def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
+    text = "Cache Key: shard-one\nSort Key: created-at\nsession_id: ok\n"
+
+    assert redact_diagnostic_text(text, limit=1000) == text
 
 
 def test_diagnostics_redacts_indented_values_under_empty_sensitive_yaml_field() -> None:
@@ -1807,6 +1817,11 @@ def test_diagnostics_redacts_sensitive_collections() -> None:
         (
             "Authorization: Basic tiny-auth\n  continued-secret\nsession_id: abc123\n",
             ("tiny-auth", "continued-secret"),
+            "session_id: abc123",
+        ),
+        (
+            "API Key:\n  - tiny-one\n  - tiny-two\nsession_id: abc123\n",
+            ("tiny-one", "tiny-two"),
             "session_id: abc123",
         ),
     ],
@@ -2271,6 +2286,7 @@ print('password: !secret "tagged-one\\n  tagged-two"\\nsession_id: tagged-yaml')
 print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 print("OPENAI_FOO=\\\\ shell-short session_id=shell123", file=sys.stderr)
+print("API Key: label-short session_id=label123", file=sys.stderr)
 raise SystemExit(2)
 """,
     )
@@ -2297,6 +2313,7 @@ raise SystemExit(2)
         "json-short",
         "yaml-short",
         "shell-short",
+        "label-short",
     ):
         assert secret not in f"{stdout_preview}\n{stderr_preview}"
     assert "api_keys: <redacted>" in stdout_preview
@@ -2312,6 +2329,7 @@ raise SystemExit(2)
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview
     assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview
+    assert "API Key: <redacted>" in stderr_preview
 
 
 def test_nonzero_exit_diagnostic_previews_redact_repo_env_json_and_parameterized_auth(

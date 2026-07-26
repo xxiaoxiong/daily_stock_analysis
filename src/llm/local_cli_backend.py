@@ -233,6 +233,18 @@ _DIGEST_AUTH_PARAM_NAMES = frozenset({
     "userhash",
     "username",
 })
+_DIAGNOSTIC_SPACED_SENSITIVE_FIELD_PATTERN = "|".join(
+    re.escape(name).replace("_", r"[ \t]+")
+    for name in sorted(
+        (name for name in _SENSITIVE_DIAGNOSTIC_FIELDS if "_" in name),
+        key=len,
+        reverse=True,
+    )
+)
+_DIAGNOSTIC_FIELD_NAME_PATTERN = (
+    rf"(?:(?i:{_DIAGNOSTIC_SPACED_SENSITIVE_FIELD_PATTERN})|"
+    r"[A-Za-z][A-Za-z0-9_-]*)"
+)
 _DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN = r"""
     (?P<value>
         "(?:\\.|[^"\\])*"
@@ -255,7 +267,7 @@ _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
 _DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN = re.compile(
     rf"""
     (?<![A-Za-z0-9_-])
-    (?P<name>[A-Za-z][A-Za-z0-9_-]*)
+    (?P<name>{_DIAGNOSTIC_FIELD_NAME_PATTERN})
     (?P<separator>[ \t]*(?:=|:)[ \t]*)
     {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
     """,
@@ -264,7 +276,7 @@ _DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN = re.compile(
 _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN = re.compile(
     rf"""
     (?P<key_quote>["'])
-    (?P<name>[A-Za-z][A-Za-z0-9_-]*)
+    (?P<name>{_DIAGNOSTIC_FIELD_NAME_PATTERN})
     (?P=key_quote)
     (?P<separator>[ \t\r\n]*:[ \t\r\n]*)
     {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
@@ -272,13 +284,13 @@ _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN = re.compile(
     re.VERBOSE,
 )
 _DIAGNOSTIC_LINE_FIELD_PATTERN = re.compile(
-    r"""
+    rf"""
     (?<![A-Za-z0-9_-])
-    (?P<name>[A-Za-z][A-Za-z0-9_-]*)
+    (?P<name>{_DIAGNOSTIC_FIELD_NAME_PATTERN})
     (?P<separator>[ \t]*(?:=|:)[ \t]*)
     (?P<value>[^\r\n]*?)
     (?=
-        (?:(?:[,;][ \t]*)|[ \t]+)[A-Za-z][A-Za-z0-9_-]*[ \t]*(?:=|:)[ \t]*
+        (?:(?:[,;][ \t]*)|[ \t]+){_DIAGNOSTIC_FIELD_NAME_PATTERN}[ \t]*(?:=|:)[ \t]*
         |
         \r?\n?
         $
@@ -289,7 +301,7 @@ _DIAGNOSTIC_LINE_FIELD_PATTERN = re.compile(
 _AUTHORIZATION_FIELD_PATTERN = re.compile(
     r"""
     (?<![A-Za-z0-9_-])
-    (?P<prefix>(?:proxy[-_]?)?authorization[ \t]*(?:=|:)[ \t]*)
+    (?P<prefix>(?:proxy[-_ \t]?)?authorization[ \t]*(?:=|:)[ \t]*)
     (?P<value>[^\r\n]*)
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -534,7 +546,7 @@ def _is_field_specific_sensitive_redaction_target(name: str) -> bool:
 
 
 def _normalize_diagnostic_field_name(name: str) -> str:
-    normalized = str(name or "").replace("-", "_")
+    normalized = re.sub(r"[- \t]+", "_", str(name or ""))
     normalized = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", normalized)
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
     return normalized.lower()
