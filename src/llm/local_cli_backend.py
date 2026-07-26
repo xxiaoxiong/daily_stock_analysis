@@ -239,7 +239,7 @@ _DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN = r"""
         |
         '(?:''|\\.|[^'\\])*'
         |
-        [^\s,;}\]]+
+        (?:\\[^\r\n]|[^\s,;}\]])+
     )
 """
 _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
@@ -529,7 +529,7 @@ def _is_field_specific_sensitive_redaction_target(name: str) -> bool:
     normalized_name = _normalize_diagnostic_field_name(name)
     return (
         _is_sensitive_structured_assignment_name(name)
-        and normalized_name not in {"authorization", "proxy_authorization", "cookie"}
+        and normalized_name not in {"authorization", "proxy_authorization"}
     )
 
 
@@ -561,16 +561,26 @@ def _leading_space_count(text: str) -> int:
     return len(text) - len(text.lstrip(" "))
 
 
+def _yaml_value_without_node_properties(value: str) -> str:
+    """Return a YAML value with leading tags and anchors removed."""
+
+    remaining = value.strip()
+    while remaining.startswith(("!", "&")):
+        property_match = re.match(r"[!&][^ \t]+(?:[ \t]+|$)", remaining)
+        if property_match is None:
+            break
+        remaining = remaining[property_match.end():].lstrip()
+    return remaining
+
+
 def _is_yaml_block_value(value: str) -> bool:
     """Return whether a YAML value introduces content on following lines."""
 
-    stripped = value.strip()
+    stripped = _yaml_value_without_node_properties(value)
     if not stripped or stripped.startswith("#"):
         return True
 
     tokens = stripped.split()
-    while tokens and tokens[0].startswith(("!", "&")):
-        tokens.pop(0)
     if not tokens or tokens[0].startswith("#"):
         return True
     if not _YAML_BLOCK_SCALAR_PATTERN.match(tokens[0]):
@@ -581,10 +591,8 @@ def _is_yaml_block_value(value: str) -> bool:
 def _yaml_value_allows_indentless_sequence(value: str) -> bool:
     """Return whether a following same-indent sequence belongs to this value."""
 
-    tokens = value.strip().split()
-    while tokens and tokens[0].startswith(("!", "&")):
-        tokens.pop(0)
-    return not tokens or tokens[0].startswith("#")
+    stripped = _yaml_value_without_node_properties(value)
+    return not stripped or stripped.startswith("#")
 
 
 def _replace_spans(text: str, replacements: Sequence[Tuple[int, int, str]]) -> str:
@@ -650,11 +658,21 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
         block_allows_indentless_sequence = False
         multiline_quote: Optional[str] = None
         for match in matches:
-            if not _is_field_specific_sensitive_redaction_target(match.group("name")):
+            name = match.group("name")
+            value = match.group("value")
+            is_redacted_authorization = (
+                _normalize_diagnostic_field_name(name)
+                in {"authorization", "proxy_authorization"}
+                and value.strip() == "<redacted>"
+            )
+            if (
+                not _is_field_specific_sensitive_redaction_target(name)
+                and not is_redacted_authorization
+            ):
                 continue
 
-            value = match.group("value")
             stripped_value = value.strip()
+            yaml_scalar_value = _yaml_value_without_node_properties(value)
             if ":" in match.group("separator") and _is_yaml_block_value(value):
                 replacement = "<redacted>"
                 if not match.group("separator")[-1:].isspace():
@@ -667,12 +685,17 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
                 )
                 continue
 
-            if stripped_value[:1] in {"'", '"'} and not _has_closed_diagnostic_quote(
-                stripped_value,
-                stripped_value[0],
+            yaml_quote = yaml_scalar_value[:1]
+            yaml_quote_is_closed = bool(
+                yaml_quote
+                and _has_closed_diagnostic_quote(yaml_scalar_value, yaml_quote)
+            )
+            if yaml_quote in {"'", '"'} and (
+                yaml_scalar_value != stripped_value or not yaml_quote_is_closed
             ):
                 replacements.append((match.start("value"), match.end("value"), "<redacted>"))
-                multiline_quote = multiline_quote or stripped_value[0]
+                if not yaml_quote_is_closed:
+                    multiline_quote = multiline_quote or yaml_quote
                 continue
 
             if stripped_value and stripped_value[0] not in {"'", '"', "{", "["}:
@@ -686,6 +709,8 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
                     # the credential as a separate diagnostic field.
                     value_end = len(line.rstrip("\r\n"))
                 replacements.append((match.start("value"), value_end, "<redacted>"))
+                if ":" in match.group("separator"):
+                    block_match = block_match or match
                 if value_end == len(line.rstrip("\r\n")):
                     break
 
@@ -939,7 +964,7 @@ def redact_diagnostic_text(text: str, *, home: Optional[str] = None, limit: int 
     redacted = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^@\s/]+@", r"\1<redacted>@", redacted)
     redacted = _URL_PATTERN.sub(_redact_sensitive_diagnostic_url, redacted)
     redacted = _redact_authorization_fields(redacted)
-    redacted = re.sub(r"(?i)(cookie\s*[:=]\s*)[^\n\r]+", r"\1<redacted>", redacted)
+    redacted = re.sub(r"(?i)(cookie[ \t]*[:=][ \t]*)[^\n\r]+", r"\1<redacted>", redacted)
     redacted = _redact_sensitive_diagnostic_assignments(redacted)
     redacted = re.sub(r"(?i)(session[_-]?secret\s*[:=]\s*)[^\s]+", r"\1<redacted>", redacted)
     redacted = re.sub(r"\b(sk-[A-Za-z0-9_-]{12,})\b", "<redacted-api-key>", redacted)

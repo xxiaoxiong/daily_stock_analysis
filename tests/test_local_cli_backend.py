@@ -1638,6 +1638,7 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ("OPENAI_API_KEYS=short", "short"),
         ("MYOPENAIKEY=short", "short"),
         ("OPENAI_V2_API_KEY=short", "short"),
+        (r"OPENAI_FOO=\ tiny-secret session_id=ok", "tiny-secret"),
         ("PUSHOVER_USER_KEY=short", "short"),
         ("R2_SECRET_ACCESS_KEY=short", "short"),
         ("My_Api_Key=myvalue", "myvalue"),
@@ -1781,6 +1782,31 @@ def test_diagnostics_redacts_sensitive_collections() -> None:
         (
             "credentials: !vault &creds\n  value: tiny-secret\nsession_id: abc123\n",
             ("tiny-secret",),
+            "session_id: abc123",
+        ),
+        (
+            "cookie:\n  session: tiny-one\n  csrf: tiny-two\nsession_id: abc123\n",
+            ("tiny-one", "tiny-two"),
+            "session_id: abc123",
+        ),
+        (
+            "password: correct horse\n  battery staple\nsession_id: abc123\n",
+            ("correct horse", "battery staple"),
+            "session_id: abc123",
+        ),
+        (
+            'password: !secret "tiny-one\n  tiny-two"\nsession_id: abc123\n',
+            ("tiny-one", "tiny-two"),
+            "session_id: abc123",
+        ),
+        (
+            "authorization:\n  scheme: Bearer\n  credentials: tiny-auth\nsession_id: abc123\n",
+            ("Bearer", "tiny-auth"),
+            "session_id: abc123",
+        ),
+        (
+            "Authorization: Basic tiny-auth\n  continued-secret\nsession_id: abc123\n",
+            ("tiny-auth", "continued-secret"),
             "session_id: abc123",
         ),
     ],
@@ -2239,8 +2265,12 @@ import sys
 print("api_keys:\\n  - tiny-one\\n  - tiny-two\\nsession_id: yaml123")
 print("api_keys: # configured keys\\n# nested note\\n- stdout-short\\n- stdout-short-2\\nsession_id: yaml456")
 print("private_key: &pem |\\n  anchored-secret\\nsession_id: anchor123")
+print("cookie:\\n  session: cookie-one\\n  csrf: cookie-two\\nsession_id: cookie-yaml")
+print("password: correct horse\\n  battery staple\\nsession_id: plain-yaml")
+print('password: !secret "tagged-one\\n  tagged-two"\\nsession_id: tagged-yaml')
 print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
+print("OPENAI_FOO=\\\\ shell-short session_id=shell123", file=sys.stderr)
 raise SystemExit(2)
 """,
     )
@@ -2258,8 +2288,15 @@ raise SystemExit(2)
         "stdout-short",
         "stdout-short-2",
         "anchored-secret",
+        "cookie-one",
+        "cookie-two",
+        "correct horse",
+        "battery staple",
+        "tagged-one",
+        "tagged-two",
         "json-short",
         "yaml-short",
+        "shell-short",
     ):
         assert secret not in f"{stdout_preview}\n{stderr_preview}"
     assert "api_keys: <redacted>" in stdout_preview
@@ -2267,9 +2304,14 @@ raise SystemExit(2)
     assert "session_id: yaml456" in stdout_preview
     assert "private_key: <redacted>" in stdout_preview
     assert "session_id: anchor123" in stdout_preview
+    assert "cookie: <redacted>" in stdout_preview
+    assert "session_id: cookie-yaml" in stdout_preview
+    assert "session_id: plain-yaml" in stdout_preview
+    assert "session_id: tagged-yaml" in stdout_preview
     assert '{"AIHUBMIX_KEY":"<redacted>","session_id":"json123"}' in stderr_preview
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview
+    assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview
 
 
 def test_nonzero_exit_diagnostic_previews_redact_repo_env_json_and_parameterized_auth(
