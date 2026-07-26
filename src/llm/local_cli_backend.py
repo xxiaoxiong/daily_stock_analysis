@@ -331,7 +331,9 @@ def _diagnostic_yaml_explicit_key_pattern() -> re.Pattern[str]:
         ^
         (?P<indent>[ ]*)
         \?[ \t]+
+        (?P<name_quote>['"]?)
         (?P<name>{_diagnostic_field_name_pattern()})
+        (?P=name_quote)
         [ \t]*(?:\#.*)?
         \r?\n?
         $

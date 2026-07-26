@@ -1729,6 +1729,16 @@ def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
             "session_id: yaml123",
         ),
         (
+            "? 'api_key'\n: single-quoted-secret\nsession_id: yaml123\n",
+            ("single-quoted-secret",),
+            "session_id: yaml123",
+        ),
+        (
+            '? "api_key"\n: double-quoted-secret\nsession_id: yaml123\n',
+            ("double-quoted-secret",),
+            "session_id: yaml123",
+        ),
+        (
             "? credentials\n:\n- tiny-one\n- tiny-two\nsession_id: yaml123\n",
             ("tiny-one", "tiny-two"),
             "session_id: yaml123",
@@ -2366,6 +2376,7 @@ print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
 print('{"set-cookie":"session=cookie-header","session_id":"header123"}', file=sys.stderr)
 print('{"api\\\\u005fkey":"escaped-json","session_id":"escaped123"}', file=sys.stderr)
 print("? api_key\\n: explicit-secret\\nsession_id: explicit123", file=sys.stderr)
+print("? 'api_key'\\n: quoted-explicit-secret\\nsession_id: quoted-explicit123", file=sys.stderr)
 print("OPENAI_API_KEY='x'\\\"'\\\"'shell-quoted' session_id=quoted123", file=sys.stderr)
 print("OPENAI_API_KEY+=appended-secret session_id=append123", file=sys.stderr)
 print("{'api_key': 'single-quoted', 'session_id': 'single123'}", file=sys.stderr)
@@ -2399,6 +2410,7 @@ raise SystemExit(2)
         "cookie-header",
         "escaped-json",
         "explicit-secret",
+        "quoted-explicit-secret",
         "shell-quoted",
         "appended-secret",
         "single-quoted",
@@ -2420,6 +2432,7 @@ raise SystemExit(2)
     assert '{"set-cookie":"<redacted>","session_id":"header123"}' in stderr_preview
     assert r'{"api\u005fkey":"<redacted>","session_id":"escaped123"}' in stderr_preview
     assert "? api_key\n: <redacted>\nsession_id: explicit123" in stderr_preview
+    assert "? 'api_key'\n: <redacted>\nsession_id: quoted-explicit123" in stderr_preview
     assert "OPENAI_API_KEY='<redacted>' session_id=quoted123" in stderr_preview
     assert "OPENAI_API_KEY+=<redacted> session_id=append123" in stderr_preview
     assert "{'api_key': '<redacted>', 'session_id': 'single123'}" in stderr_preview
