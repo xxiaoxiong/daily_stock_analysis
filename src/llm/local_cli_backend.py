@@ -918,12 +918,17 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
                     and stripped_value != "<redacted>"
                     and not _is_registered_sensitive_field_title(name)
                 ):
-                    # An unquoted YAML scalar has no reliable same-line boundary.
-                    # Fail closed instead of treating assignment-like text inside
-                    # the credential as a separate diagnostic field.
-                    value_end = len(line.rstrip("\r\n"))
+                    flow_value_end = _find_diagnostic_flow_scalar_end(line, match.start("value"))
+                    if flow_value_end is not None:
+                        value_end = flow_value_end
+                    else:
+                        # Outside YAML flow collections, an unquoted scalar has
+                        # no reliable same-line boundary. Fail closed instead
+                        # of treating assignment-like text inside the
+                        # credential as a separate diagnostic field.
+                        value_end = len(line.rstrip("\r\n"))
                 replacements.append((match.start("value"), value_end, "<redacted>"))
-                if ":" in match.group("separator"):
+                if ":" in match.group("separator") and value_end == len(line.rstrip("\r\n")):
                     block_match = block_match or match
                 if value_end == len(line.rstrip("\r\n")):
                     break
@@ -1084,7 +1089,50 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
         ),
         redacted,
     )
-    return _diagnostic_field_assignment_pattern().sub(redact_structured_field, redacted)
+    redacted = _diagnostic_field_assignment_pattern().sub(redact_structured_field, redacted)
+    return _redact_partially_redacted_flow_scalars(redacted)
+
+
+def _redact_partially_redacted_flow_scalars(text: str) -> str:
+    """Collapse any flow-style sensitive scalar tail left after token-level redaction."""
+
+    field_name_pattern = _diagnostic_field_name_pattern()
+    pattern = re.compile(
+        r"""
+        (?P<prefix>
+            "
+            (?P<json_name>(?:\\.|[^"\\])*)
+            "
+            (?P<json_separator>[ \t\r\n]*:[ \t\r\n]*)
+            |
+            (?<![A-Za-z0-9_-])
+            (?P<field_name_quote>')
+            (?P<field_name>"""
+        + field_name_pattern
+        + r""")
+            (?P=field_name_quote)
+            (?P<field_separator>[ \t]*(?:=|:)[ \t]*)
+        )
+        <redacted>
+        (?P<tail>[ \t]+[^\r\n,}\]]+?)
+        (?=[ \t]*[,}\]]|\r?\n?$)
+        """,
+        re.VERBOSE,
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        json_name = match.group("json_name")
+        if json_name is not None:
+            sensitive = _is_sensitive_structured_assignment_name(
+                _decode_diagnostic_double_quoted_field_name(json_name)
+            )
+        else:
+            sensitive = _is_field_specific_sensitive_redaction_target(match.group("field_name"))
+        if not sensitive:
+            return match.group(0)
+        return f"{match.group('prefix')}<redacted>"
+
+    return pattern.sub(replace, text)
 
 
 def _has_closed_diagnostic_quote(value: str, quote: str) -> bool:
@@ -1161,6 +1209,49 @@ def _consume_diagnostic_collection(value: str, start: int) -> int:
             continue
         index += 1
     return len(value)
+
+
+def _find_diagnostic_flow_scalar_end(value: str, start: int) -> Optional[int]:
+    """Return the end of an unquoted YAML flow scalar when delimiters are reliable."""
+
+    closing_by_opening = {"{": "}", "[": "]"}
+    stack: list[str] = []
+    index = 0
+    while index < start:
+        char = value[index]
+        if char in {"'", '"'}:
+            index = _consume_diagnostic_scalar(value, index)
+            continue
+        if char in closing_by_opening:
+            stack.append(closing_by_opening[char])
+            index += 1
+            continue
+        if stack and char == stack[-1]:
+            stack.pop()
+        index += 1
+
+    if not stack:
+        return None
+
+    index = start
+    while index < len(value):
+        char = value[index]
+        if char in {"'", '"'}:
+            index = _consume_diagnostic_scalar(value, index)
+            continue
+        if char in closing_by_opening:
+            stack.append(closing_by_opening[char])
+            index += 1
+            continue
+        if len(stack) == 1 and char in {",", stack[-1]}:
+            return index
+        if stack and char == stack[-1]:
+            stack.pop()
+            index += 1
+            continue
+        index += 1
+
+    return None
 
 
 def _authorization_value_end(value: str) -> int:

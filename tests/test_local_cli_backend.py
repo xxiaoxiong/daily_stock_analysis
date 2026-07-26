@@ -2225,6 +2225,38 @@ def test_diagnostics_redacts_quoted_json_authentication_fields(text: str) -> Non
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            '{"password": correct horse battery staple, "session_id": "ok"}',
+            '{"password": <redacted>, "session_id": "ok"}',
+        ),
+        (
+            '{"api_key": correct horse, "session_id": "ok"}',
+            '{"api_key": <redacted>, "session_id": "ok"}',
+        ),
+        (
+            "{'password': correct horse battery staple, 'session_id': 'ok'}",
+            "{'password': <redacted>, 'session_id': 'ok'}",
+        ),
+        (
+            "{password: correct horse, session_id: ok}",
+            "{password: <redacted>, session_id: ok}",
+        ),
+    ],
+)
+def test_diagnostics_redacts_flow_style_sensitive_keys_with_unquoted_multiword_scalars(
+    text: str,
+    expected: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == expected
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "password: correct horse=staple session_id=abc123",
@@ -2630,6 +2662,34 @@ raise SystemExit(2)
     assert "cookie-secret" not in stderr_preview
     assert '{"authorization":"<redacted>","session_id":"auth123"}' in stderr_preview
     assert '{"cookie":"<redacted>","session_id":"cookie123"}' in stderr_preview
+
+
+def test_nonzero_exit_previews_redact_flow_style_unquoted_multitoken_secrets(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print('{"password": correct horse battery staple, "session_id": "json123"}', file=sys.stderr)
+print('{"api_key": correct horse, "session_id": "api123"}', file=sys.stderr)
+print("{'password': correct horse battery staple, 'session_id': 'yaml123'}", file=sys.stderr)
+print('{password: correct horse, session_id: yaml456}', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert "correct horse" not in stderr_preview
+    assert "battery staple" not in stderr_preview
+    assert '{"password": <redacted>, "session_id": "json123"}' in stderr_preview
+    assert '{"api_key": <redacted>, "session_id": "api123"}' in stderr_preview
+    assert "{'password': <redacted>, 'session_id': 'yaml123'}" in stderr_preview
+    assert "{password: <redacted>, session_id: yaml456}" in stderr_preview
 
 
 def test_preview_diagnostics_from_files_redacts_truncated_quoted_sensitive_scalar(
