@@ -184,6 +184,7 @@ _SENSITIVE_DIAGNOSTIC_FIELDS = frozenset({
     "secret_access_key",
     "secret_key",
     "sendkey",
+    "set_cookie",
     "session_secret",
     "signing_key",
     "token",
@@ -208,6 +209,7 @@ _SENSITIVE_DIAGNOSTIC_FIELD_SUFFIXES = (
     "_db_url",
     "_encryption_key",
     "_password",
+    "_passwd",
     "_private_key",
     "_secret",
     "_secret_access_key",
@@ -284,9 +286,9 @@ def _diagnostic_field_assignment_pattern() -> re.Pattern[str]:
 def _diagnostic_json_assignment_pattern() -> re.Pattern[str]:
     return re.compile(
         rf"""
-        (?P<key_quote>["'])
-        (?P<name>{_diagnostic_field_name_pattern()})
-        (?P=key_quote)
+        "
+        (?P<name>(?:\\.|[^"\\])*)
+        "
         (?P<separator>[ \t\r\n]*:[ \t\r\n]*)
         {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
         """,
@@ -578,6 +580,18 @@ def _normalize_diagnostic_field_name(name: str) -> str:
     return normalized.lower()
 
 
+def _decode_diagnostic_json_field_name(name: str) -> str:
+    """Decode JSON escapes in a key before applying the sensitive-name contract."""
+
+    if "\\" not in name:
+        return name
+    try:
+        decoded = json.loads(f'"{name}"')
+    except (TypeError, ValueError):
+        return name
+    return decoded if isinstance(decoded, str) else name
+
+
 def _is_sensitive_diagnostic_field_name(name: str) -> bool:
     normalized = _normalize_diagnostic_field_name(name)
     return (
@@ -682,7 +696,9 @@ def _redact_sensitive_collection_assignments(text: str) -> str:
     redacted = replace_matches(
         redacted,
         _diagnostic_json_assignment_pattern(),
-        _is_sensitive_structured_assignment_name,
+        lambda name: _is_sensitive_structured_assignment_name(
+            _decode_diagnostic_json_field_name(name)
+        ),
     )
     return replace_matches(
         redacted,
@@ -840,7 +856,9 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
     redacted = _diagnostic_json_assignment_pattern().sub(
         lambda match: (
             _redact_assignment_value(match)
-            if _is_sensitive_structured_assignment_name(match.group("name"))
+            if _is_sensitive_structured_assignment_name(
+                _decode_diagnostic_json_field_name(match.group("name"))
+            )
             else match.group(0)
         ),
         redacted,

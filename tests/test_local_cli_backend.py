@@ -1660,6 +1660,10 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ("clientSecret: tiny", "tiny"),
         ("database_url: sqlite-short", "sqlite-short"),
         ("aws_secret_access_key: tiny", "tiny"),
+        ("db_passwd: tiny-secret", "tiny-secret"),
+        ('{"db_passwd":"tiny-secret"}', "tiny-secret"),
+        ('{"set-cookie":"session=tiny-secret"}', "tiny-secret"),
+        (r'{"api\u005fkey":"tiny-secret"}', "tiny-secret"),
     ],
 )
 def test_diagnostics_redacts_short_credential_assignments(text: str, secret: str) -> None:
@@ -2317,6 +2321,8 @@ print("cookie:\\n  session: cookie-one\\n  csrf: cookie-two\\nsession_id: cookie
 print("password: correct horse\\n  battery staple\\nsession_id: plain-yaml")
 print('password: !secret "tagged-one\\n  tagged-two"\\nsession_id: tagged-yaml')
 print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
+print('{"set-cookie":"session=cookie-header","session_id":"header123"}', file=sys.stderr)
+print('{"api\\\\u005fkey":"escaped-json","session_id":"escaped123"}', file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 print("OPENAI_FOO=\\\\ shell-short session_id=shell123", file=sys.stderr)
 print("API Key: label-short session_id=label123", file=sys.stderr)
@@ -2344,6 +2350,8 @@ raise SystemExit(2)
         "tagged-one",
         "tagged-two",
         "json-short",
+        "cookie-header",
+        "escaped-json",
         "yaml-short",
         "shell-short",
         "label-short",
@@ -2359,6 +2367,8 @@ raise SystemExit(2)
     assert "session_id: plain-yaml" in stdout_preview
     assert "session_id: tagged-yaml" in stdout_preview
     assert '{"AIHUBMIX_KEY":"<redacted>","session_id":"json123"}' in stderr_preview
+    assert '{"set-cookie":"<redacted>","session_id":"header123"}' in stderr_preview
+    assert r'{"api\u005fkey":"<redacted>","session_id":"escaped123"}' in stderr_preview
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview
     assert "OPENAI_FOO=<redacted> session_id=shell123" in stderr_preview
