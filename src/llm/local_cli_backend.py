@@ -389,7 +389,16 @@ _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
 _AUTHORIZATION_FIELD_PATTERN = re.compile(
     r"""
     (?<![A-Za-z0-9_-])
-    (?P<prefix>(?:proxy[-_ \t]?)?authorization[ \t]*(?:=|:)[ \t]*)
+    (?P<prefix>
+        (?:
+            (?P<quote>["'])
+            (?:(?:proxy[-_ \t]?)?authorization)
+            (?P=quote)
+            |
+            (?:proxy[-_ \t]?)?authorization
+        )
+        [ \t]*(?:=|:)[ \t]*
+    )
     (?P<value>[^\r\n]*)
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -1294,14 +1303,21 @@ def _redact_partially_redacted_flow_scalars(text: str) -> str:
 
     def replace(match: re.Match[str]) -> str:
         json_name = match.group("json_name")
+        normalized_name: Optional[str]
         if json_name is not None:
-            sensitive = _is_sensitive_structured_assignment_name(
+            normalized_name = _normalize_diagnostic_field_name(
                 _decode_diagnostic_double_quoted_field_name(json_name)
             )
+            sensitive = _is_sensitive_structured_assignment_name(normalized_name)
         else:
+            normalized_name = _normalize_diagnostic_field_name(match.group("field_name"))
             sensitive = _is_field_specific_sensitive_redaction_target(match.group("field_name"))
         if not sensitive:
             return match.group(0)
+        if normalized_name in {"authorization", "proxy_authorization"}:
+            trailing_field = match.group("tail").lstrip(" \t")
+            if _diagnostic_field_assignment_pattern().match(trailing_field):
+                return match.group(0)
         return f"{match.group('prefix')}<redacted>"
 
     return pattern.sub(replace, text)
@@ -1495,6 +1511,8 @@ def _redact_authorization_fields(text: str) -> str:
     def redact(match: re.Match[str]) -> str:
         prefix = match.group("prefix")
         value = match.group("value") or ""
+        if match.group("quote") is not None and value.lstrip(" \t")[:1] in {'"', "'", "{", "["}:
+            return match.group(0)
         if not value.strip():
             return f"{prefix}<redacted>"
         auth_end = _authorization_value_end(value)

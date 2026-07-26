@@ -2140,6 +2140,26 @@ def test_diagnostics_redacts_ansi_prefixed_sensitive_fields() -> None:
             "session_id=proxy123",
         ),
         (
+            "'authorization': Bearer tiny-secret session_id=ok",
+            "tiny-secret",
+            "session_id=ok",
+        ),
+        (
+            "'proxy_authorization': Basic tiny-secret session_id=ok",
+            "tiny-secret",
+            "session_id=ok",
+        ),
+        (
+            '"authorization": Bearer tiny-secret session_id=ok',
+            "tiny-secret",
+            "session_id=ok",
+        ),
+        (
+            '"proxy_authorization": Basic tiny-secret session_id=ok',
+            "tiny-secret",
+            "session_id=ok",
+        ),
+        (
             "proxyAuthorization=Negotiate camel.secret token_budget=1000",
             "camel.secret",
             "token_budget=1000",
@@ -2161,6 +2181,10 @@ def test_diagnostics_redacts_non_bearer_authorization_values(
         or "Proxy-Authorization: <redacted>" in redacted
         or "proxy-authorization=<redacted>" in redacted
         or "proxy_authorization: <redacted>" in redacted
+        or "'authorization': <redacted>" in redacted
+        or "'proxy_authorization': <redacted>" in redacted
+        or '"authorization": <redacted>' in redacted
+        or '"proxy_authorization": <redacted>' in redacted
         or "proxyAuthorization=<redacted>" in redacted
     )
 
@@ -2282,6 +2306,15 @@ def test_diagnostics_redacts_quoted_json_authentication_fields(text: str) -> Non
     assert "tiny-secret" not in redacted
     assert '"<redacted>"' in redacted
     assert '"session_id":"abc123"' in redacted
+
+
+def test_diagnostics_preserves_json_structure_for_quoted_authorization_fields() -> None:
+    redacted = redact_diagnostic_text(
+        '{"authorization":"Bearer tiny-secret","session_id":"abc123"}',
+        limit=1000,
+    )
+
+    assert redacted == '{"authorization":"<redacted>","session_id":"abc123"}'
 
 
 @pytest.mark.parametrize(
@@ -2631,6 +2664,30 @@ raise SystemExit(2)
     assert "API Key: <redacted>" in stderr_preview
     assert "OpenAI API Keys (Multi): <redacted>" in stderr_preview
     assert "? api_key\n: <redacted>\nsession_id: explicit456" in stderr_preview
+
+
+def test_nonzero_exit_previews_redact_quoted_authorization_fields(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("'authorization': Bearer quoted-auth-secret session_id=auth456", file=sys.stderr)
+print('"proxy_authorization": Basic quoted-proxy-secret session_id=proxy456', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    stderr_preview = exc_info.value.details["stderr_preview"]
+
+    assert "quoted-auth-secret" not in stderr_preview
+    assert "quoted-proxy-secret" not in stderr_preview
+    assert "'authorization': <redacted> session_id=auth456" in stderr_preview
+    assert '"proxy_authorization": <redacted> session_id=proxy456' in stderr_preview
 
 
 def test_nonzero_exit_previews_redact_explicit_yaml_with_indented_comment(
