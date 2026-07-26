@@ -1903,6 +1903,16 @@ def test_diagnostics_redacts_ansi_prefixed_sensitive_fields() -> None:
             "abc.def.ghi",
             "token_budget=1000",
         ),
+        (
+            "proxy_authorization: Basic underscore-secret session_id=proxy123",
+            "underscore-secret",
+            "session_id=proxy123",
+        ),
+        (
+            "proxyAuthorization=Negotiate camel.secret token_budget=1000",
+            "camel.secret",
+            "token_budget=1000",
+        ),
     ],
 )
 def test_diagnostics_redacts_non_bearer_authorization_values(
@@ -1919,6 +1929,8 @@ def test_diagnostics_redacts_non_bearer_authorization_values(
         or "authorization=<redacted>" in redacted
         or "Proxy-Authorization: <redacted>" in redacted
         or "proxy-authorization=<redacted>" in redacted
+        or "proxy_authorization: <redacted>" in redacted
+        or "proxyAuthorization=<redacted>" in redacted
     )
 
 
@@ -2271,6 +2283,7 @@ print("AIHUBMIX_KEY=stdout-short session_id=stdout123")
 print("LONGBRIDGE_APP_KEY=stderr-short session_id=bridge123", file=sys.stderr)
 print("NTFY_URL=https://ntfy.sh/private-topic session_id=ntfy123", file=sys.stderr)
 print("PUSHOVER_USER_KEY=notify-short session_id=push123", file=sys.stderr)
+print("proxyAuthorization: Basic proxy-short session_id=proxy123", file=sys.stderr)
 print('{', file=sys.stderr)
 print('  "api_key":', file=sys.stderr)
 print('    "json-short",', file=sys.stderr)
@@ -2292,6 +2305,7 @@ raise SystemExit(2)
     assert "stderr-short" not in stderr_preview
     assert "https://ntfy.sh/private-topic" not in stderr_preview
     assert "notify-short" not in stderr_preview
+    assert "proxy-short" not in stderr_preview
     assert "json-short" not in stderr_preview
     assert "tiny-secret" not in stderr_preview
     assert "sig-short" not in stderr_preview
@@ -2299,6 +2313,7 @@ raise SystemExit(2)
     assert "LONGBRIDGE_APP_KEY=<redacted> session_id=bridge123" in stderr_preview
     assert "NTFY_URL=<redacted> session_id=ntfy123" in stderr_preview
     assert "PUSHOVER_USER_KEY=<redacted> session_id=push123" in stderr_preview
+    assert "proxyAuthorization: <redacted> session_id=proxy123" in stderr_preview
     assert '"api_key":\n    "<redacted>"' in stderr_preview
     assert '"session_id": "json123"' in stderr_preview
     assert "Authorization: <redacted> session_id=aws123" in stderr_preview

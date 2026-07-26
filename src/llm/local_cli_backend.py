@@ -289,7 +289,7 @@ _DIAGNOSTIC_LINE_FIELD_PATTERN = re.compile(
 _AUTHORIZATION_FIELD_PATTERN = re.compile(
     r"""
     (?<![A-Za-z0-9_-])
-    (?P<prefix>(?:proxy-)?authorization[ \t]*(?:=|:)[ \t]*)
+    (?P<prefix>(?:proxy[-_]?)?authorization[ \t]*(?:=|:)[ \t]*)
     (?P<value>[^\r\n]*)
     """,
     re.IGNORECASE | re.VERBOSE,
