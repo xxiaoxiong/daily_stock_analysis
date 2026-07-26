@@ -578,7 +578,10 @@ def _yaml_value_without_node_properties(value: str) -> str:
 
     remaining = value.strip()
     while remaining.startswith(("!", "&")):
-        property_match = re.match(r"[!&][^ \t]+(?:[ \t]+|$)", remaining)
+        if remaining.startswith("&"):
+            property_match = re.match(r"&[^ \t]+(?:[ \t]+|$)", remaining)
+        else:
+            property_match = re.match(r"!(?:<[^>]+>|[^ \t]*)?(?:[ \t]+|$)", remaining)
         if property_match is None:
             break
         remaining = remaining[property_match.end():].lstrip()

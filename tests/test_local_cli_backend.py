@@ -1691,6 +1691,19 @@ def test_diagnostics_redacts_yaml_scalars_with_spaces_and_blocks() -> None:
     assert "private_key: <redacted>" in redacted
 
 
+def test_diagnostics_redacts_yaml_block_scalars_with_node_properties() -> None:
+    text = (
+        "private_key: !<tag:yaml.org,2002:str> &pem |\n"
+        "  tiny-secret\n"
+        "session_id: yaml123\n"
+    )
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tiny-secret" not in redacted
+    assert redacted == "private_key: <redacted>\nsession_id: yaml123\n"
+
+
 def test_diagnostics_preserves_non_sensitive_spaced_key_labels() -> None:
     text = "Cache Key: shard-one\nSort Key: created-at\nsession_id: ok\n"
 
@@ -2279,7 +2292,7 @@ def test_nonzero_exit_previews_redact_empty_yaml_blocks_and_registered_fields(
 import sys
 print("api_keys:\\n  - tiny-one\\n  - tiny-two\\nsession_id: yaml123")
 print("api_keys: # configured keys\\n# nested note\\n- stdout-short\\n- stdout-short-2\\nsession_id: yaml456")
-print("private_key: &pem |\\n  anchored-secret\\nsession_id: anchor123")
+print("private_key: !<tag:yaml.org,2002:str> &pem |\\n  anchored-secret\\nsession_id: anchor123")
 print("cookie:\\n  session: cookie-one\\n  csrf: cookie-two\\nsession_id: cookie-yaml")
 print("password: correct horse\\n  battery staple\\nsession_id: plain-yaml")
 print('password: !secret "tagged-one\\n  tagged-two"\\nsession_id: tagged-yaml')
