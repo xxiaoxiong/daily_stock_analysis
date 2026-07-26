@@ -332,6 +332,25 @@ def _diagnostic_line_field_pattern() -> re.Pattern[str]:
 
 
 @lru_cache(maxsize=1)
+def _diagnostic_double_quoted_yaml_line_pattern() -> re.Pattern[str]:
+    return re.compile(
+        r"""
+        ^
+        (?P<indent>[ ]*)
+        (?P<sequence_prefix>-[ \t]+)?
+        "
+        (?P<name>(?:\\.|[^"\\])*)
+        "
+        (?P<separator>[ \t]*:[ \t]*)
+        (?P<value>[^\r\n]*)
+        (?P<newline>\r?\n?)
+        $
+        """,
+        re.VERBOSE,
+    )
+
+
+@lru_cache(maxsize=1)
 def _diagnostic_yaml_explicit_key_pattern() -> re.Pattern[str]:
     return re.compile(
         rf"""
@@ -813,6 +832,152 @@ def _replace_spans(text: str, replacements: Sequence[Tuple[int, int, str]]) -> s
     return updated
 
 
+def _consume_redacted_yaml_block_lines(
+    lines: Sequence[str],
+    *,
+    start_index: int,
+    base_indent: int,
+    allows_indentless_sequence: bool,
+) -> tuple[list[str], int]:
+    kept_lines: list[str] = []
+    index = start_index
+    while index < len(lines):
+        next_line = lines[index]
+        stripped_next_line = next_line.strip()
+        next_indent = _leading_space_count(next_line)
+        if stripped_next_line and next_indent <= base_indent:
+            is_same_indent_comment = (
+                next_indent == base_indent and stripped_next_line.startswith("#")
+            )
+            is_indentless_sequence = (
+                allows_indentless_sequence
+                and next_indent == base_indent
+                and (
+                    stripped_next_line == "-"
+                    or stripped_next_line.startswith("- ")
+                )
+            )
+            if not is_same_indent_comment and not is_indentless_sequence:
+                break
+        if not stripped_next_line:
+            kept_lines.append(next_line)
+        index += 1
+    return kept_lines, index
+
+
+def _consume_redacted_multiline_quote_lines(
+    lines: Sequence[str],
+    *,
+    start_index: int,
+    multiline_quote: str,
+) -> tuple[list[str], int]:
+    kept_lines: list[str] = []
+    index = start_index
+    while index < len(lines):
+        next_line = lines[index]
+        close_index = _diagnostic_quote_close_index(next_line, multiline_quote, start=0)
+        if close_index is None:
+            index += 1
+            continue
+        trailing = next_line[close_index:]
+        if trailing.strip():
+            kept_lines.append(trailing)
+        index += 1
+        break
+    return kept_lines, index
+
+
+def _is_inside_diagnostic_flow_collection(text: str) -> bool:
+    closing_by_opening = {"{": "}", "[": "]"}
+    stack: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in {"'", '"'}:
+            index = _consume_diagnostic_scalar(text, index)
+            continue
+        if char in closing_by_opening:
+            stack.append(closing_by_opening[char])
+            index += 1
+            continue
+        if stack and char == stack[-1]:
+            stack.pop()
+        index += 1
+    return bool(stack)
+
+
+def _redact_double_quoted_yaml_sensitive_field(
+    lines: Sequence[str],
+    index: int,
+) -> Optional[tuple[list[str], int]]:
+    line = lines[index]
+    match = _diagnostic_double_quoted_yaml_line_pattern().match(line)
+    if match is None:
+        return None
+
+    decoded_name = _decode_diagnostic_double_quoted_field_name(match.group("name"))
+    if not _is_field_specific_sensitive_redaction_target(decoded_name):
+        return None
+    if _is_inside_diagnostic_flow_collection("".join(lines[:index])):
+        return None
+
+    value = match.group("value")
+    stripped_value = value.strip()
+    yaml_scalar_value = _yaml_value_without_node_properties(value)
+    base_indent = _leading_space_count(line)
+    value_span = (match.start("value"), match.end("value"))
+
+    if _is_yaml_block_value(value):
+        replacement = "<redacted>"
+        if not match.group("separator")[-1:].isspace():
+            replacement = f" {replacement}"
+        kept_lines, next_index = _consume_redacted_yaml_block_lines(
+            lines,
+            start_index=index + 1,
+            base_indent=base_indent,
+            allows_indentless_sequence=_yaml_value_allows_indentless_sequence(value),
+        )
+        return (
+            [_replace_spans(line, [(value_span[0], value_span[1], replacement)]), *kept_lines],
+            next_index,
+        )
+
+    yaml_quote = yaml_scalar_value[:1]
+    yaml_quote_is_closed = bool(
+        yaml_quote and _has_closed_diagnostic_quote(yaml_scalar_value, yaml_quote)
+    )
+    if yaml_quote in {"'", '"'} and (
+        yaml_scalar_value != stripped_value or not yaml_quote_is_closed
+    ):
+        kept_lines = [_replace_spans(line, [(value_span[0], value_span[1], "<redacted>")])]
+        next_index = index + 1
+        if not yaml_quote_is_closed:
+            trailing_lines, next_index = _consume_redacted_multiline_quote_lines(
+                lines,
+                start_index=next_index,
+                multiline_quote=yaml_quote,
+            )
+            kept_lines.extend(trailing_lines)
+        return kept_lines, next_index
+
+    if stripped_value and stripped_value[0] not in {"'", '"', "{", "["}:
+        redacted_line = _replace_spans(line, [(value_span[0], value_span[1], "<redacted>")])
+        kept_lines = [redacted_line]
+        continuation_index = index + 1
+        while continuation_index < len(lines):
+            next_line = lines[continuation_index]
+            if not next_line.strip():
+                kept_lines.append(next_line)
+                continuation_index += 1
+                continue
+            if _leading_space_count(next_line) <= base_indent:
+                break
+            continuation_index += 1
+        return kept_lines, continuation_index
+
+    return None
+
+
 def _redact_sensitive_collection_assignments(text: str) -> str:
     def replace_matches(
         source: str,
@@ -861,6 +1026,12 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
     while index < len(lines):
         line = lines[index]
         matches = list(_diagnostic_line_field_pattern().finditer(line))
+        if not matches:
+            quoted_yaml_redaction = _redact_double_quoted_yaml_sensitive_field(lines, index)
+            if quoted_yaml_redaction is not None:
+                kept_lines, index = quoted_yaml_redaction
+                redacted_lines.extend(kept_lines)
+                continue
         if not matches:
             redacted_lines.append(line)
             index += 1
@@ -943,43 +1114,24 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
 
         if block_match is not None:
             base_indent = _leading_space_count(line)
-            while index < len(lines):
-                next_line = lines[index]
-                stripped_next_line = next_line.strip()
-                next_indent = _leading_space_count(next_line)
-                if stripped_next_line and next_indent <= base_indent:
-                    is_same_indent_comment = (
-                        next_indent == base_indent and stripped_next_line.startswith("#")
-                    )
-                    is_indentless_sequence = (
-                        block_allows_indentless_sequence
-                        and next_indent == base_indent
-                        and (
-                            stripped_next_line == "-"
-                            or stripped_next_line.startswith("- ")
-                        )
-                    )
-                    if not is_same_indent_comment and not is_indentless_sequence:
-                        break
-                if not next_line.strip():
-                    redacted_lines.append(next_line)
-                index += 1
+            kept_lines, index = _consume_redacted_yaml_block_lines(
+                lines,
+                start_index=index,
+                base_indent=base_indent,
+                allows_indentless_sequence=block_allows_indentless_sequence,
+            )
+            redacted_lines.extend(kept_lines)
             continue
 
         if multiline_quote is None:
             continue
 
-        while index < len(lines):
-            next_line = lines[index]
-            close_index = _diagnostic_quote_close_index(next_line, multiline_quote, start=0)
-            if close_index is None:
-                index += 1
-                continue
-            trailing = next_line[close_index:]
-            if trailing.strip():
-                redacted_lines.append(trailing)
-            index += 1
-            break
+        kept_lines, index = _consume_redacted_multiline_quote_lines(
+            lines,
+            start_index=index,
+            multiline_quote=multiline_quote,
+        )
+        redacted_lines.extend(kept_lines)
 
     return "".join(redacted_lines)
 

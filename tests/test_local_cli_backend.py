@@ -1912,6 +1912,16 @@ def test_diagnostics_redacts_sensitive_collections() -> None:
             "session_id: abc123",
         ),
         (
+            '"password": correct horse\n battery staple\nsession_id: abc123\n',
+            ("correct horse", "battery staple"),
+            "session_id: abc123",
+        ),
+        (
+            '"password":\n  tiny-one\n  tiny-two\nsession_id: abc123\n',
+            ("tiny-one", "tiny-two"),
+            "session_id: abc123",
+        ),
+        (
             'password: !secret "tiny-one\n  tiny-two"\nsession_id: abc123\n',
             ("tiny-one", "tiny-two"),
             "session_id: abc123",
@@ -2198,6 +2208,40 @@ def test_diagnostics_redacts_multiline_quoted_sensitive_scalar() -> None:
     assert redacted == "password: <redacted>\nsession_id=abc123\n"
 
 
+def test_diagnostics_redacts_multiline_plain_scalar_under_double_quoted_yaml_key() -> None:
+    redacted = redact_diagnostic_text(
+        '"password": correct horse\n battery staple\nsession_id: abc123\n',
+        limit=1000,
+    )
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == '"password": <redacted>\nsession_id: abc123\n'
+
+
+def test_diagnostics_redacts_single_line_multiword_plain_scalar_under_double_quoted_yaml_key() -> None:
+    redacted = redact_diagnostic_text(
+        '"password": correct horse battery staple\nsession_id: abc123\n',
+        limit=1000,
+    )
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == '"password": <redacted>\nsession_id: abc123\n'
+
+
+def test_diagnostics_redacts_indentless_sequence_under_double_quoted_yaml_key() -> None:
+    redacted = redact_diagnostic_text(
+        '"password": # configured\n- tiny-one\n- tiny-two\nsession_id: abc123\n',
+        limit=1000,
+    )
+
+    assert "configured" not in redacted
+    assert "tiny-one" not in redacted
+    assert "tiny-two" not in redacted
+    assert redacted == '"password": <redacted>\nsession_id: abc123\n'
+
+
 def test_diagnostics_redacts_pretty_printed_json_value_on_following_line() -> None:
     redacted = redact_diagnostic_text(
         '{\n  "api_key":\n    "tiny-secret",\n  "session_id": "json123"\n}',
@@ -2478,6 +2522,9 @@ print("api_keys: # configured keys\\n# nested note\\n- stdout-short\\n- stdout-s
 print("private_key: !<tag:yaml.org,2002:str> &pem |\\n  anchored-secret\\nsession_id: anchor123")
 print("cookie:\\n  session: cookie-one\\n  csrf: cookie-two\\nsession_id: cookie-yaml")
 print("password: correct horse\\n  battery staple\\nsession_id: plain-yaml")
+print('"password": correct horse\\n battery staple\\nsession_id: quoted-key-yaml')
+print('"password": correct horse battery staple\\nsession_id: quoted-inline-yaml')
+print('"password":\\n  quoted-empty-one\\n  quoted-empty-two\\nsession_id: quoted-empty-yaml')
 print('password: !secret "tagged-one\\n  tagged-two"\\nsession_id: tagged-yaml')
 print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
 print('{"set-cookie":"session=cookie-header","session_id":"header123"}', file=sys.stderr)
@@ -2514,6 +2561,8 @@ raise SystemExit(2)
         "cookie-two",
         "correct horse",
         "battery staple",
+        "quoted-empty-one",
+        "quoted-empty-two",
         "tagged-one",
         "tagged-two",
         "json-short",
@@ -2541,6 +2590,9 @@ raise SystemExit(2)
     assert "cookie: <redacted>" in stdout_preview
     assert "session_id: cookie-yaml" in stdout_preview
     assert "session_id: plain-yaml" in stdout_preview
+    assert "session_id: quoted-key-yaml" in stdout_preview
+    assert "session_id: quoted-inline-yaml" in stdout_preview
+    assert "session_id: quoted-empty-yaml" in stdout_preview
     assert "session_id: tagged-yaml" in stdout_preview
     assert '{"AIHUBMIX_KEY":"<redacted>","session_id":"json123"}' in stderr_preview
     assert '{"set-cookie":"<redacted>","session_id":"header123"}' in stderr_preview
