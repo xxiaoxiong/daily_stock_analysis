@@ -1655,6 +1655,8 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
         ("OPENAI_V2_API_KEY=short", "short"),
         (r"OPENAI_FOO=\ tiny-secret session_id=ok", "tiny-secret"),
         ("OPENAI_API_KEY=\\\ntiny-secret session_id=ok", "tiny-secret"),
+        ("OPENAI_FOO=$(printf %s tiny-secret) session_id=ok", "tiny-secret"),
+        ("export OPENAI_FOO=$(printf %s tiny-secret) session_id=ok", "tiny-secret"),
         ("PUSHOVER_USER_KEY=short", "short"),
         ("R2_SECRET_ACCESS_KEY=short", "short"),
         ("My_Api_Key=myvalue", "myvalue"),
@@ -2202,6 +2204,31 @@ def test_diagnostics_redacts_parameterized_oauth_authorization_values() -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "preserved"),
+    [
+        (
+            "Authorization: Bearer first-secret Proxy-Authorization: Basic second-secret session_id=ok",
+            "session_id=ok",
+        ),
+        (
+            "Authorization: Bearer first-secret authorization=Basic second-secret session_id=ok",
+            "session_id=ok",
+        ),
+    ],
+)
+def test_diagnostics_redacts_multiple_authorization_fields_on_one_line(
+    text: str,
+    preserved: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "first-secret" not in redacted
+    assert "second-secret" not in redacted
+    assert preserved in redacted
+    assert redacted.count("<redacted>") == 2
+
+
+@pytest.mark.parametrize(
     ("text", "secret", "preserved"),
     [
         (
@@ -2734,6 +2761,36 @@ raise SystemExit(2)
     assert '"proxy_authorization": <redacted> session_id=proxy456' in stderr_preview
 
 
+def test_nonzero_exit_previews_redact_multiple_authorization_fields_on_one_line(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("Authorization: Bearer first-secret Proxy-Authorization: Basic second-secret session_id=auth789", file=sys.stderr)
+print("Authorization: Bearer third-secret authorization=Basic fourth-secret session_id=auth790", file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    stderr_preview = exc_info.value.details["stderr_preview"]
+
+    for secret in ("first-secret", "second-secret", "third-secret", "fourth-secret"):
+        assert secret not in stderr_preview
+    assert (
+        "Authorization: <redacted> Proxy-Authorization: <redacted> session_id=auth789"
+        in stderr_preview
+    )
+    assert (
+        "Authorization: <redacted> authorization=<redacted> session_id=auth790"
+        in stderr_preview
+    )
+
+
 def test_nonzero_exit_previews_redact_explicit_yaml_with_indented_comment(
     tmp_path: Path,
 ) -> None:
@@ -2831,6 +2888,31 @@ raise SystemExit(2)
     assert '"session_id": "json123"' in stderr_preview
     assert "Authorization: <redacted> session_id=aws123" in stderr_preview
     assert "Authorization: <redacted> token_budget=1000" in stderr_preview
+
+
+def test_nonzero_exit_previews_redact_sensitive_env_command_substitutions(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("OPENAI_FOO=$(printf %s stdout-secret) session_id=stdout789")
+print("export OPENAI_API_KEY=$(printf '%s %s' stderr tiny-secret) session_id=stderr789", file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    stdout_preview = exc_info.value.details["stdout_preview"]
+    stderr_preview = exc_info.value.details["stderr_preview"]
+
+    for secret in ("stdout-secret", "tiny-secret"):
+        assert secret not in f"{stdout_preview}\n{stderr_preview}"
+    assert "OPENAI_FOO=<redacted> session_id=stdout789" in stdout_preview
+    assert "export OPENAI_API_KEY=<redacted> session_id=stderr789" in stderr_preview
 
 
 def test_nonzero_exit_previews_redact_json_auth_and_embedded_assignments(

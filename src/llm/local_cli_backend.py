@@ -387,6 +387,15 @@ _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
     """,
     re.VERBOSE,
 )
+_DIAGNOSTIC_ENV_ASSIGNMENT_PREFIX_PATTERN = re.compile(
+    r"""
+    (?<![A-Za-z0-9_])
+    (?P<prefix>(?:export[ \t]+)?)
+    (?P<name>[A-Z][A-Z0-9_]*)
+    (?P<separator>[ \t]*\+?=[ \t]*)
+    """,
+    re.VERBOSE,
+)
 _AUTHORIZATION_FIELD_PATTERN = re.compile(
     r"""
     (?<![A-Za-z0-9_-])
@@ -400,7 +409,14 @@ _AUTHORIZATION_FIELD_PATTERN = re.compile(
         )
         [ \t]*(?:=|:)[ \t]*
     )
-    (?P<value>[^\r\n]*)
+    (?P<value>[^\r\n]*?)
+    (?=
+        [ \t]+["']?(?:proxy[-_ \t]?)?authorization["']?[ \t]*(?:=|:)
+        |
+        \r?\n
+        |
+        $
+    )
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -641,6 +657,10 @@ def _is_field_specific_sensitive_redaction_target(name: str) -> bool:
         _is_sensitive_structured_assignment_name(name)
         and normalized_name not in {"authorization", "proxy_authorization"}
     )
+
+
+def _is_multiline_sensitive_redaction_target(name: str) -> bool:
+    return _is_sensitive_structured_assignment_name(name)
 
 
 def _normalize_diagnostic_field_name(name: str) -> str:
@@ -928,12 +948,18 @@ def _redact_double_quoted_yaml_sensitive_field(
         return None
 
     decoded_name = _decode_diagnostic_double_quoted_field_name(match.group("name"))
-    if not _is_field_specific_sensitive_redaction_target(decoded_name):
+    if not _is_multiline_sensitive_redaction_target(decoded_name):
         return None
     if _is_inside_diagnostic_flow_collection("".join(lines[:index])):
         return None
 
     value = match.group("value")
+    normalized_name = _normalize_diagnostic_field_name(decoded_name)
+    if (
+        normalized_name in {"authorization", "proxy_authorization"}
+        and value.lstrip(" \t").startswith("<redacted>")
+    ):
+        return None
     stripped_value = value.strip()
     yaml_scalar_value = _yaml_value_without_node_properties(value)
     base_indent = _leading_space_count(line)
@@ -1056,14 +1082,20 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
         for match in matches:
             name = match.group("name")
             value = match.group("value")
+            normalized_name = _normalize_diagnostic_field_name(name)
             is_redacted_authorization = (
-                _normalize_diagnostic_field_name(name)
-                in {"authorization", "proxy_authorization"}
+                normalized_name in {"authorization", "proxy_authorization"}
                 and value.strip() == "<redacted>"
+            )
+            is_authorization_yaml_block = (
+                normalized_name in {"authorization", "proxy_authorization"}
+                and ":" in match.group("separator")
+                and _is_yaml_block_value(value)
             )
             if (
                 not _is_field_specific_sensitive_redaction_target(name)
                 and not is_redacted_authorization
+                and not is_authorization_yaml_block
             ):
                 continue
 
@@ -1164,7 +1196,7 @@ def _redact_yaml_explicit_sensitive_fields(text: str) -> str:
         )
         if (
             key_match is None
-            or not _is_field_specific_sensitive_redaction_target(key_name)
+            or not _is_multiline_sensitive_redaction_target(key_name)
         ):
             redacted_lines.append(key_line)
             index += 1
@@ -1257,7 +1289,24 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
             else match.group(0)
         )
 
+    def redact_sensitive_env_command_substitutions(source: str) -> str:
+        replacements = []
+        last_end = -1
+        for match in _DIAGNOSTIC_ENV_ASSIGNMENT_PREFIX_PATTERN.finditer(source):
+            value_start = match.end()
+            if value_start < last_end or source[value_start:value_start + 2] != "$(":
+                continue
+            if not _is_sensitive_env_name(match.group("name")):
+                continue
+            value_end = _consume_shell_command_substitution(source, value_start)
+            if value_end <= value_start:
+                continue
+            replacements.append((value_start, value_end, "<redacted>"))
+            last_end = value_end
+        return _replace_spans(source, replacements)
+
     redacted = _redact_yaml_explicit_sensitive_fields(text)
+    redacted = redact_sensitive_env_command_substitutions(redacted)
     redacted = _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN.sub(redact_env, redacted)
     redacted = _redact_sensitive_collection_assignments(redacted)
     redacted = _redact_multiline_sensitive_fields(redacted)
@@ -1394,6 +1443,38 @@ def _consume_diagnostic_collection(value: str, start: int) -> int:
             stack.pop()
             index += 1
             if not stack:
+                return index
+            continue
+        index += 1
+    return len(value)
+
+
+def _consume_shell_command_substitution(value: str, start: int) -> int:
+    if start + 1 >= len(value) or value[start:start + 2] != "$(":
+        return start
+
+    depth = 1
+    index = start + 2
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            index = _consume_diagnostic_scalar(value, index)
+            continue
+        if value.startswith("$(", index):
+            depth += 1
+            index += 2
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth -= 1
+            index += 1
+            if depth == 0:
                 return index
             continue
         index += 1
