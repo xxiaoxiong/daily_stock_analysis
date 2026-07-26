@@ -1697,6 +1697,39 @@ def test_diagnostics_redacts_indented_values_under_empty_sensitive_yaml_field() 
     assert "session_id: yaml123\n" in redacted
 
 
+def test_diagnostics_redacts_comment_only_sensitive_yaml_field_blocks() -> None:
+    text = "api_keys: # configured keys\n  - tiny-one\n  - tiny-two\nsession_id: yaml123\n"
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tiny-one" not in redacted
+    assert "tiny-two" not in redacted
+    assert "api_keys: <redacted>\n" in redacted
+    assert "session_id: yaml123\n" in redacted
+
+
+def test_diagnostics_redacts_comment_lines_within_sensitive_yaml_field_blocks() -> None:
+    text = "api_keys: # configured keys\n# nested note\n- tiny-one\n- tiny-two\nsession_id: yaml123\n"
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "nested note" not in redacted
+    assert "tiny-one" not in redacted
+    assert "tiny-two" not in redacted
+    assert redacted == "api_keys: <redacted>\nsession_id: yaml123\n"
+
+
+def test_diagnostics_redacts_indentless_sequences_under_sensitive_yaml_field() -> None:
+    text = "api_keys:\n- tiny-one\n- tiny-two\nsession_id: yaml123\n"
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tiny-one" not in redacted
+    assert "tiny-two" not in redacted
+    assert "api_keys: <redacted>\n" in redacted
+    assert "session_id: yaml123\n" in redacted
+
+
 def test_diagnostics_redacts_sensitive_collections() -> None:
     text = (
         "api_keys: [first-secret, second-secret] token_budget: 1000\n"
@@ -2172,6 +2205,7 @@ def test_nonzero_exit_previews_redact_empty_yaml_blocks_and_registered_fields(
         """
 import sys
 print("api_keys:\\n  - tiny-one\\n  - tiny-two\\nsession_id: yaml123")
+print("api_keys: # configured keys\\n# nested note\\n- stdout-short\\n- stdout-short-2\\nsession_id: yaml456")
 print('{"AIHUBMIX_KEY":"json-short","session_id":"json123"}', file=sys.stderr)
 print("WECOM_ENCODING_AES_KEY: yaml-short\\nsession_id: wecom123", file=sys.stderr)
 raise SystemExit(2)
@@ -2184,10 +2218,19 @@ raise SystemExit(2)
     assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
     stdout_preview = exc_info.value.details["stdout_preview"]
     stderr_preview = exc_info.value.details["stderr_preview"]
-    for secret in ("tiny-one", "tiny-two", "json-short", "yaml-short"):
+    for secret in (
+        "tiny-one",
+        "tiny-two",
+        "nested note",
+        "stdout-short",
+        "stdout-short-2",
+        "json-short",
+        "yaml-short",
+    ):
         assert secret not in f"{stdout_preview}\n{stderr_preview}"
     assert "api_keys: <redacted>" in stdout_preview
     assert "session_id: yaml123" in stdout_preview
+    assert "session_id: yaml456" in stdout_preview
     assert '{"AIHUBMIX_KEY":"<redacted>","session_id":"json123"}' in stderr_preview
     assert "WECOM_ENCODING_AES_KEY: <redacted>" in stderr_preview
     assert "session_id: wecom123" in stderr_preview

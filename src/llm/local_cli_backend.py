@@ -565,6 +565,14 @@ def _is_yaml_block_scalar(value: str) -> bool:
     return bool(_YAML_BLOCK_SCALAR_PATTERN.match(value.strip()))
 
 
+def _is_yaml_comment_only_value(value: str) -> bool:
+    return value.lstrip().startswith("#")
+
+
+def _is_yaml_comment_only_line(line: str) -> bool:
+    return line.lstrip().startswith("#")
+
+
 def _replace_spans(text: str, replacements: Sequence[Tuple[int, int, str]]) -> str:
     updated = text
     for start, end, replacement in sorted(replacements, reverse=True):
@@ -625,6 +633,7 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
 
         replacements = []
         block_match: Optional[re.Match[str]] = None
+        block_allows_indentless_sequence = False
         multiline_quote: Optional[str] = None
         for match in matches:
             if not _is_field_specific_sensitive_redaction_target(match.group("name")):
@@ -632,12 +641,15 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
 
             value = match.group("value")
             stripped_value = value.strip()
-            if ":" in match.group("separator") and not stripped_value:
+            if ":" in match.group("separator") and (
+                not stripped_value or _is_yaml_comment_only_value(value)
+            ):
                 replacement = "<redacted>"
                 if not match.group("separator")[-1:].isspace():
                     replacement = f" {replacement}"
                 replacements.append((match.start("value"), match.end("value"), replacement))
                 block_match = block_match or match
+                block_allows_indentless_sequence = True
                 continue
 
             if _is_yaml_block_scalar(value):
@@ -679,7 +691,19 @@ def _redact_multiline_sensitive_fields(text: str) -> str:
             base_indent = _leading_space_count(line)
             while index < len(lines):
                 next_line = lines[index]
-                if next_line.strip() and _leading_space_count(next_line) <= base_indent:
+                next_line_indent = _leading_space_count(next_line)
+                is_comment_only_line = _is_yaml_comment_only_line(next_line)
+                is_indentless_sequence_entry = (
+                    block_allows_indentless_sequence
+                    and next_line_indent == base_indent
+                    and next_line.lstrip().startswith("-")
+                )
+                if (
+                    next_line.strip()
+                    and not is_comment_only_line
+                    and next_line_indent <= base_indent
+                    and not is_indentless_sequence_entry
+                ):
                     break
                 if not next_line.strip():
                     redacted_lines.append(next_line)
