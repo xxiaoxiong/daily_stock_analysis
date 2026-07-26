@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from contextlib import ExitStack, contextmanager
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlsplit
 
 from src.llm.backend_registry import (
@@ -53,6 +54,19 @@ _FINAL_MESSAGE_OMITTED_PREVIEW = "<final-message omitted from stdout preview>"
 _STDOUT_PREVIEW_OMITTED = "<stdout preview omitted because output-last-message was too large>"
 _PROCESS_POLL_INTERVAL_SECONDS = 0.05
 _URL_PATTERN = re.compile(r"https?://[^\s,;)\]}]+", re.IGNORECASE)
+_ANSI_ESCAPE_PATTERN = re.compile(
+    r"""
+    \x1B
+    (?:
+        \[[0-?]*[ -/]*[@-~]
+        |
+        \][^\x07\x1B]*(?:\x07|\x1B\\)
+        |
+        [@-_]
+    )
+    """,
+    re.VERBOSE,
+)
 _SHELL_META_CHARS = ("|", ">", "<", ";", "`")
 _SHELL_META_STRINGS = ("&&", "||", "$(")
 _UNSUPPORTED_ARG_MARKERS = (
@@ -133,6 +147,154 @@ _SENSITIVE_ENV_PATTERNS = (
     "VERTEX_",
     "WEBHOOK",
 )
+_SENSITIVE_ENV_EXACT_NAMES = frozenset({
+    "AIHUBMIX_KEY",
+    "DINGTALK_APP_KEY",
+    "LONGBRIDGE_APP_KEY",
+    "PUSHOVER_USER_KEY",
+    "WECOM_ENCODING_AES_KEY",
+})
+_SENSITIVE_DIAGNOSTIC_FIELDS = frozenset({
+    "access_token",
+    "access_key",
+    "access_key_id",
+    "api_key",
+    "api_keys",
+    "apikey",
+    "api_secret",
+    "app_secret",
+    "auth_token",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "credential",
+    "credentials",
+    "csrf_token",
+    "database_url",
+    "db_url",
+    "github_token",
+    "id_token",
+    "encryption_key",
+    "password",
+    "passwd",
+    "private_key",
+    "proxy_authorization",
+    "refresh_token",
+    "secret",
+    "secret_access_key",
+    "secret_key",
+    "sendkey",
+    "session_secret",
+    "signing_key",
+    "token",
+    "tushare_token",
+    "verification_token",
+    "webhook",
+    "webhook_url",
+})
+_SENSITIVE_DIAGNOSTIC_FIELD_SUFFIXES = (
+    "_access_key",
+    "_access_key_id",
+    "_access_token",
+    "_api_key",
+    "_api_keys",
+    "_api_secret",
+    "_app_secret",
+    "_auth_token",
+    "_client_secret",
+    "_credential",
+    "_credentials",
+    "_database_url",
+    "_db_url",
+    "_encryption_key",
+    "_password",
+    "_private_key",
+    "_secret",
+    "_secret_access_key",
+    "_secret_key",
+    "_sendkey",
+    "_session_secret",
+    "_signing_key",
+    "_token",
+    "_webhook",
+    "_webhook_url",
+)
+_DIGEST_AUTH_PARAM_NAMES = frozenset({
+    "algorithm",
+    "charset",
+    "cnonce",
+    "nc",
+    "nonce",
+    "opaque",
+    "qop",
+    "realm",
+    "response",
+    "uri",
+    "userhash",
+    "username",
+})
+_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN = r"""
+    (?P<value>
+        "(?:\\.|[^"\\])*"
+        |
+        '(?:''|\\.|[^'\\])*'
+        |
+        [^\s,;}\]]+
+    )
+"""
+_DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN = re.compile(
+    rf"""
+    (?<![A-Za-z0-9_])
+    (?P<prefix>(?:export[ \t]+)?)
+    (?P<name>[A-Z][A-Z0-9_]*)
+    (?P<separator>[ \t]*=[ \t]*)
+    {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
+    """,
+    re.VERBOSE,
+)
+_DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN = re.compile(
+    rf"""
+    (?<![A-Za-z0-9_-])
+    (?P<name>[A-Za-z][A-Za-z0-9_-]*)
+    (?P<separator>[ \t]*(?:=|:)[ \t]*)
+    {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
+    """,
+    re.VERBOSE,
+)
+_DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN = re.compile(
+    rf"""
+    (?P<key_quote>["'])
+    (?P<name>[A-Za-z][A-Za-z0-9_-]*)
+    (?P=key_quote)
+    (?P<separator>[ \t\r\n]*:[ \t\r\n]*)
+    {_DIAGNOSTIC_ASSIGNMENT_VALUE_PATTERN}
+    """,
+    re.VERBOSE,
+)
+_DIAGNOSTIC_LINE_FIELD_PATTERN = re.compile(
+    r"""
+    (?<![A-Za-z0-9_-])
+    (?P<name>[A-Za-z][A-Za-z0-9_-]*)
+    (?P<separator>[ \t]*(?:=|:)[ \t]*)
+    (?P<value>[^\r\n]*?)
+    (?=
+        (?:(?:[,;][ \t]*)|[ \t]+)[A-Za-z][A-Za-z0-9_-]*[ \t]*(?:=|:)[ \t]*
+        |
+        \r?\n?
+        $
+    )
+    """,
+    re.VERBOSE,
+)
+_AUTHORIZATION_FIELD_PATTERN = re.compile(
+    r"""
+    (?<![A-Za-z0-9_-])
+    (?P<prefix>(?:proxy-)?authorization[ \t]*(?:=|:)[ \t]*)
+    (?P<value>[^\r\n]*)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_YAML_BLOCK_SCALAR_PATTERN = re.compile(r"^[|>][0-9+-]*[ \t]*(?:#.*)?$")
 _CLAUDE_CODE_STATIC_INSTRUCTION = (
     "Generate the requested DSA analysis output from stdin. "
     "Return only the final response content. Do not call tools, read files, "
@@ -350,17 +512,382 @@ def _popen_session_kwargs() -> Dict[str, Any]:
     return {"start_new_session": True}
 
 
-def redact_diagnostic_text(text: str, *, home: Optional[str] = None, limit: int = _PREVIEW_LIMIT) -> str:
-    """Redact sensitive diagnostics and return a bounded preview."""
+def _redact_assignment_value(match: re.Match[str]) -> str:
+    """Replace one parsed assignment value while preserving its surrounding syntax."""
 
-    redacted = text or ""
+    original = match.group(0)
+    value = match.group("value")
+    replacement = "<redacted>"
+    if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
+        replacement = f"{value[0]}<redacted>{value[0]}"
+    value_start = match.start("value") - match.start()
+    value_end = match.end("value") - match.start()
+    return f"{original[:value_start]}{replacement}{original[value_end:]}"
+
+
+def _is_field_specific_sensitive_redaction_target(name: str) -> bool:
+    normalized_name = _normalize_diagnostic_field_name(name)
+    return (
+        _is_sensitive_diagnostic_field_name(name)
+        and normalized_name not in {"authorization", "proxy_authorization", "cookie"}
+    )
+
+
+def _normalize_diagnostic_field_name(name: str) -> str:
+    normalized = str(name or "").replace("-", "_")
+    normalized = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", normalized)
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
+    return normalized.lower()
+
+
+def _is_sensitive_diagnostic_field_name(name: str) -> bool:
+    normalized = _normalize_diagnostic_field_name(name)
+    return (
+        normalized in _SENSITIVE_DIAGNOSTIC_FIELDS
+        or any(normalized.endswith(suffix) for suffix in _SENSITIVE_DIAGNOSTIC_FIELD_SUFFIXES)
+    )
+
+
+def _leading_space_count(text: str) -> int:
+    return len(text) - len(text.lstrip(" "))
+
+
+def _is_yaml_block_scalar(value: str) -> bool:
+    return bool(_YAML_BLOCK_SCALAR_PATTERN.match(value.strip()))
+
+
+def _replace_spans(text: str, replacements: Sequence[Tuple[int, int, str]]) -> str:
+    updated = text
+    for start, end, replacement in sorted(replacements, reverse=True):
+        updated = f"{updated[:start]}{replacement}{updated[end:]}"
+    return updated
+
+
+def _redact_sensitive_collection_assignments(text: str) -> str:
+    def replace_matches(
+        source: str,
+        pattern: re.Pattern[str],
+        is_sensitive_name: Callable[[str], bool],
+    ) -> str:
+        replacements = []
+        last_end = -1
+        for match in pattern.finditer(source):
+            name = match.group("name")
+            value = match.group("value")
+            if not is_sensitive_name(name) or not value or value[0] not in "{[":
+                continue
+            value_start = match.start("value")
+            if value_start < last_end:
+                continue
+            value_end = _consume_diagnostic_collection(source, value_start)
+            replacements.append((value_start, value_end, "<redacted>"))
+            last_end = value_end
+        return _replace_spans(source, replacements)
+
+    redacted = replace_matches(text, _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN, _is_sensitive_env_name)
+    redacted = replace_matches(
+        redacted,
+        _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN,
+        _is_sensitive_diagnostic_field_name,
+    )
+    return replace_matches(
+        redacted,
+        _DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN,
+        _is_field_specific_sensitive_redaction_target,
+    )
+
+
+def _redact_multiline_sensitive_fields(text: str) -> str:
+    """Redact YAML/log scalar fields that span spaces or indented block lines."""
+
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return text
+
+    redacted_lines = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        matches = list(_DIAGNOSTIC_LINE_FIELD_PATTERN.finditer(line))
+        if not matches:
+            redacted_lines.append(line)
+            index += 1
+            continue
+
+        replacements = []
+        block_match: Optional[re.Match[str]] = None
+        multiline_quote: Optional[str] = None
+        for match in matches:
+            if not _is_field_specific_sensitive_redaction_target(match.group("name")):
+                continue
+
+            value = match.group("value")
+            stripped_value = value.strip()
+            if _is_yaml_block_scalar(value):
+                replacements.append((match.start("value"), match.end("value"), "<redacted>"))
+                block_match = block_match or match
+                continue
+
+            if stripped_value[:1] in {"'", '"'} and not _has_closed_diagnostic_quote(
+                stripped_value,
+                stripped_value[0],
+            ):
+                replacements.append((match.start("value"), match.end("value"), "<redacted>"))
+                multiline_quote = multiline_quote or stripped_value[0]
+                continue
+
+            if stripped_value and stripped_value[0] not in {"'", '"', "{", "["}:
+                value_end = match.end("value")
+                if (
+                    ":" in match.group("separator")
+                    and stripped_value != "<redacted>"
+                ):
+                    # An unquoted YAML scalar has no reliable same-line boundary.
+                    # Fail closed instead of treating assignment-like text inside
+                    # the credential as a separate diagnostic field.
+                    value_end = len(line.rstrip("\r\n"))
+                replacements.append((match.start("value"), value_end, "<redacted>"))
+                if value_end == len(line.rstrip("\r\n")):
+                    break
+
+        if not replacements:
+            redacted_lines.append(line)
+            index += 1
+            continue
+
+        redacted_lines.append(_replace_spans(line, replacements))
+        index += 1
+
+        if block_match is not None:
+            base_indent = _leading_space_count(line)
+            while index < len(lines):
+                next_line = lines[index]
+                if next_line.strip() and _leading_space_count(next_line) <= base_indent:
+                    break
+                if not next_line.strip():
+                    redacted_lines.append(next_line)
+                index += 1
+            continue
+
+        if multiline_quote is None:
+            continue
+
+        while index < len(lines):
+            next_line = lines[index]
+            close_index = _diagnostic_quote_close_index(next_line, multiline_quote, start=0)
+            if close_index is None:
+                index += 1
+                continue
+            trailing = next_line[close_index:]
+            if trailing.strip():
+                redacted_lines.append(trailing)
+            index += 1
+            break
+
+    return "".join(redacted_lines)
+
+
+def _redact_sensitive_diagnostic_assignments(text: str) -> str:
+    """Redact parsed env and structured-field assignments under separate contracts."""
+
+    def redact_env(match: re.Match[str]) -> str:
+        name = match.group("name")
+        return _redact_assignment_value(match) if _is_sensitive_env_name(name) else match.group(0)
+
+    def redact_structured_field(match: re.Match[str]) -> str:
+        return (
+            _redact_assignment_value(match)
+            if _is_field_specific_sensitive_redaction_target(match.group("name"))
+            else match.group(0)
+        )
+
+    redacted = _DIAGNOSTIC_ENV_ASSIGNMENT_PATTERN.sub(redact_env, text)
+    redacted = _redact_sensitive_collection_assignments(redacted)
+    redacted = _redact_multiline_sensitive_fields(redacted)
+    redacted = _DIAGNOSTIC_JSON_ASSIGNMENT_PATTERN.sub(
+        lambda match: (
+            _redact_assignment_value(match)
+            if _is_sensitive_diagnostic_field_name(match.group("name"))
+            else match.group(0)
+        ),
+        redacted,
+    )
+    return _DIAGNOSTIC_FIELD_ASSIGNMENT_PATTERN.sub(redact_structured_field, redacted)
+
+
+def _has_closed_diagnostic_quote(value: str, quote: str) -> bool:
+    return _diagnostic_quote_close_index(value, quote, start=1) is not None
+
+
+def _diagnostic_quote_close_index(value: str, quote: str, *, start: int) -> Optional[int]:
+    index = start
+    while index < len(value):
+        char = value[index]
+        if quote == "'" and char == "'" and index + 1 < len(value) and value[index + 1] == "'":
+            index += 2
+            continue
+        if char == "\\" and index + 1 < len(value):
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        index += 1
+    return None
+
+
+def _consume_diagnostic_scalar(
+    value: str,
+    start: int,
+    *,
+    stop_chars: str = " \t,;",
+) -> int:
+    if start >= len(value):
+        return start
+    quote = value[start]
+    if quote in {"'", '"'}:
+        index = start + 1
+        while index < len(value):
+            char = value[index]
+            if quote == "'" and char == "'" and index + 1 < len(value) and value[index + 1] == "'":
+                index += 2
+                continue
+            if char == "\\" and index + 1 < len(value):
+                index += 2
+                continue
+            if char == quote:
+                return index + 1
+            index += 1
+        return len(value)
+
+    index = start
+    while index < len(value) and value[index] not in stop_chars:
+        index += 1
+    return index
+
+
+def _consume_diagnostic_collection(value: str, start: int) -> int:
+    if start >= len(value) or value[start] not in "{[":
+        return start
+
+    closing_by_opening = {"{": "}", "[": "]"}
+    stack = [closing_by_opening[value[start]]]
+    index = start + 1
+    while index < len(value):
+        char = value[index]
+        if char in {"'", '"'}:
+            index = _consume_diagnostic_scalar(value, index)
+            continue
+        if char in closing_by_opening:
+            stack.append(closing_by_opening[char])
+            index += 1
+            continue
+        if stack and char == stack[-1]:
+            stack.pop()
+            index += 1
+            if not stack:
+                return index
+            continue
+        index += 1
+    return len(value)
+
+
+def _authorization_value_end(value: str) -> int:
+    scheme_match = re.match(r"[A-Za-z][A-Za-z0-9_-]*", value)
+    if scheme_match is None:
+        return len(value)
+
+    index = scheme_match.end()
+    while index < len(value) and value[index].isspace():
+        index += 1
+
+    auth_end = _consume_authorization_param_list(value, index)
+    if auth_end > index:
+        return auth_end
+
+    simple_value_end = _consume_diagnostic_scalar(value, index)
+    return simple_value_end if simple_value_end > index else len(value)
+
+
+def _consume_authorization_param_list(
+    value: str,
+    start: int,
+    *,
+    allowed_names: Optional[frozenset[str]] = None,
+) -> int:
+    index = start
+    auth_end = start
+    consumed_any = False
+    first_param = True
+    while index < len(value):
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if not first_param:
+            if index >= len(value) or value[index] != ",":
+                break
+            index += 1
+            while index < len(value) and value[index].isspace():
+                index += 1
+        name_match = re.match(r"[A-Za-z][A-Za-z0-9_-]*", value[index:])
+        if name_match is None:
+            break
+        name = _normalize_diagnostic_field_name(name_match.group(0))
+        if allowed_names is not None and name not in allowed_names:
+            break
+        index += name_match.end()
+        while index < len(value) and value[index].isspace():
+            index += 1
+        if index >= len(value) or value[index] != "=":
+            break
+        index += 1
+        saw_whitespace_after_equals = False
+        while index < len(value) and value[index].isspace():
+            saw_whitespace_after_equals = True
+            index += 1
+        if saw_whitespace_after_equals and re.match(r"[A-Za-z][A-Za-z0-9_-]*\s*=", value[index:]):
+            break
+        scalar_end = _consume_diagnostic_scalar(value, index, stop_chars=" \t,")
+        if scalar_end <= index:
+            break
+        consumed_any = True
+        auth_end = scalar_end
+        index = scalar_end
+        first_param = False
+
+    return auth_end if consumed_any else start
+
+
+def _redact_authorization_fields(text: str) -> str:
+    def redact(match: re.Match[str]) -> str:
+        prefix = match.group("prefix")
+        value = match.group("value") or ""
+        if not value.strip():
+            return f"{prefix}<redacted>"
+        auth_end = _authorization_value_end(value)
+        if auth_end <= 0:
+            return f"{prefix}<redacted>"
+        return f"{prefix}<redacted>{value[auth_end:]}"
+
+    return _AUTHORIZATION_FIELD_PATTERN.sub(redact, text)
+
+
+def redact_diagnostic_text(text: str, *, home: Optional[str] = None, limit: int = _PREVIEW_LIMIT) -> str:
+    """Redact sensitive diagnostics and return a bounded preview.
+
+    Uppercase environment assignments intentionally reuse the fail-closed child
+    environment contract. Scalar YAML/JSON/log fields use a narrower allowlist
+    so ordinary fields such as ``token_budget`` and ``session_id`` remain useful
+    for troubleshooting.
+    """
+
+    redacted = _ANSI_ESCAPE_PATTERN.sub("", text or "")
     home_path = home or os.path.expanduser("~")
     if home_path:
         redacted = redacted.replace(home_path, "~")
     redacted = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^@\s/]+@", r"\1<redacted>@", redacted)
     redacted = _URL_PATTERN.sub(_redact_sensitive_diagnostic_url, redacted)
-    redacted = re.sub(r"(?i)(authorization\s*[:=]\s*)(bearer\s+)?[^\s]+", r"\1<redacted>", redacted)
+    redacted = _redact_authorization_fields(redacted)
     redacted = re.sub(r"(?i)(cookie\s*[:=]\s*)[^\n\r]+", r"\1<redacted>", redacted)
+    redacted = _redact_sensitive_diagnostic_assignments(redacted)
     redacted = re.sub(r"(?i)(session[_-]?secret\s*[:=]\s*)[^\s]+", r"\1<redacted>", redacted)
     redacted = re.sub(r"\b(sk-[A-Za-z0-9_-]{12,})\b", "<redacted-api-key>", redacted)
     redacted = re.sub(r"\b(AIza[A-Za-z0-9_-]{16,})\b", "<redacted-api-key>", redacted)
@@ -1500,8 +2027,29 @@ def _is_command_not_executable_error(exc: OSError) -> bool:
     return False
 
 
+@lru_cache(maxsize=1)
+def _registered_sensitive_env_exact_names() -> frozenset[str]:
+    """Reuse the config registry's secret-field contract without creating an import cycle."""
+
+    try:
+        from src.core.config_registry import _FIELD_DEFINITIONS
+    except Exception:
+        return frozenset()
+
+    return frozenset(
+        str(name).upper()
+        for name, metadata in _FIELD_DEFINITIONS.items()
+        if isinstance(metadata, Mapping) and metadata.get("is_sensitive")
+    )
+
+
 def _is_sensitive_env_name(upper_name: str) -> bool:
-    return any(pattern in upper_name for pattern in _SENSITIVE_ENV_PATTERNS)
+    return (
+        upper_name in _SENSITIVE_ENV_EXACT_NAMES
+        or upper_name in _registered_sensitive_env_exact_names()
+    ) or any(
+        pattern in upper_name for pattern in _SENSITIVE_ENV_PATTERNS
+    )
 
 
 def _first_unsafe_token(tokens: Sequence[str]) -> str:

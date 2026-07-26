@@ -1372,13 +1372,17 @@ def test_env_allowlist_and_denylist(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_HOME", "/tmp/codex-home")
     monkeypatch.setenv("LC_MESSAGES", "C")
     monkeypatch.setenv("UNRELATED_VALUE", "leak")
+    monkeypatch.setenv("AIHUBMIX_KEY", "aihubmix-secret")
     monkeypatch.setenv("CODEX_CLI_TOKEN", "codex-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude")
+    monkeypatch.setenv("LONGBRIDGE_APP_KEY", "longbridge-secret")
     monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", "{}")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    monkeypatch.setenv("PUSHOVER_USER_KEY", "pushover-secret")
     monkeypatch.setenv("WEBHOOK_TOKEN", "token")
+    monkeypatch.setenv("WECOM_ENCODING_AES_KEY", "wecom-secret")
     monkeypatch.setenv("AUTHORIZATION", "Bearer token")
 
     child_env = build_local_cli_env()
@@ -1388,13 +1392,17 @@ def test_env_allowlist_and_denylist(monkeypatch) -> None:
     assert child_env["CODEX_HOME"] == "/tmp/codex-home"
     assert child_env["LC_MESSAGES"] == "C"
     assert "UNRELATED_VALUE" not in child_env
+    assert "AIHUBMIX_KEY" not in child_env
     assert "CODEX_CLI_TOKEN" not in child_env
     assert "ANTHROPIC_API_KEY" not in child_env
     assert "ANTHROPIC_MODEL" not in child_env
     assert "CLAUDE_CONFIG_DIR" not in child_env
+    assert "LONGBRIDGE_APP_KEY" not in child_env
     assert "OPENCODE_CONFIG_CONTENT" not in child_env
     assert "OPENAI_API_KEY" not in child_env
+    assert "PUSHOVER_USER_KEY" not in child_env
     assert "WEBHOOK_TOKEN" not in child_env
+    assert "WECOM_ENCODING_AES_KEY" not in child_env
     assert "AUTHORIZATION" not in child_env
 
 
@@ -1616,6 +1624,529 @@ def test_diagnostics_redacts_webhook_urls_and_preserves_adjacent_normal_urls() -
     assert "access_token" not in redacted
     assert redacted.count("<redacted-url>") == 2
     assert "https://example.com/public/docs?foo=bar" in redacted
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        ("FEISHU_APP_SECRET=xxy12345abcdef", "xxy12345abcdef"),
+        ("AIHUBMIX_KEY=short", "short"),
+        ("CUSTOM_API_KEY=abc123xyz789short", "abc123xyz789short"),
+        ("LONGBRIDGE_APP_KEY=short", "short"),
+        ("NTFY_URL=https://ntfy.sh/private-topic", "https://ntfy.sh/private-topic"),
+        ("API_KEYS=short", "short"),
+        ("OPENAI_API_KEYS=short", "short"),
+        ("MYOPENAIKEY=short", "short"),
+        ("OPENAI_V2_API_KEY=short", "short"),
+        ("PUSHOVER_USER_KEY=short", "short"),
+        ("R2_SECRET_ACCESS_KEY=short", "short"),
+        ("My_Api_Key=myvalue", "myvalue"),
+        ("PASSWORD='abc def ghi' next", "abc def ghi"),
+        ("SESSION_SECRET='abc def ghi' next", "abc def ghi"),
+        ("Authorization: Bearer tiny", "tiny"),
+        ('"api_key": "short123"', "short123"),
+        ('{"accessToken":"short123"}', "short123"),
+        ("api_keys: short123", "short123"),
+        ("bot_token: tiny", "tiny"),
+        ("telegram_bot_token: tiny", "tiny"),
+        ("client_secret: tiny", "tiny"),
+        ("clientSecret: tiny", "tiny"),
+        ("database_url: sqlite-short", "sqlite-short"),
+        ("aws_secret_access_key: tiny", "tiny"),
+    ],
+)
+def test_diagnostics_redacts_short_credential_assignments(text: str, secret: str) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert secret not in redacted
+    assert "<redacted>" in redacted
+
+
+def test_diagnostics_redacts_yaml_scalars_with_spaces_and_blocks() -> None:
+    text = (
+        "retry: 3 password: correct horse battery staple\n"
+        "backup_password: 'correct horse''s secret'\n"
+        "INFO private_key: |\n"
+        "  tiny-secret\n"
+        "  second secret line\n"
+        "token_budget: 1000\n"
+    )
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "correct horse battery staple" not in redacted
+    assert "correct horse''s secret" not in redacted
+    assert "tiny-secret" not in redacted
+    assert "second secret line" not in redacted
+    assert "retry: 3" in redacted
+    assert "token_budget: 1000" in redacted
+    assert "password: <redacted>" in redacted
+    assert "backup_password: '<redacted>'\n" in redacted
+    assert "''s secret" not in redacted
+    assert "private_key: <redacted>" in redacted
+
+
+def test_diagnostics_redacts_sensitive_collections() -> None:
+    text = (
+        "api_keys: [first-secret, second-secret] token_budget: 1000\n"
+        '{"credentials":{"username":"alice","value":"tiny-secret"},"session_id":"abc123"}'
+    )
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "first-secret" not in redacted
+    assert "second-secret" not in redacted
+    assert "tiny-secret" not in redacted
+    assert "api_keys: <redacted> token_budget: 1000" in redacted
+    assert '{"credentials":<redacted>,"session_id":"abc123"}' in redacted
+
+
+def test_diagnostics_redacts_ansi_prefixed_sensitive_fields() -> None:
+    text = "\x1b[31mpassword: tiny\x1b[0m session_id=abc123 \x1b[32mapi_key: short123\x1b[0m"
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "\x1b[" not in redacted
+    assert "tiny" not in redacted
+    assert "short123" not in redacted
+    assert redacted == "password: <redacted>"
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "preserved"),
+    [
+        (
+            "Authorization: Basic dGlueTpzZWNyZXQ= session_id=abc123",
+            "dGlueTpzZWNyZXQ=",
+            "session_id=abc123",
+        ),
+        (
+            "Authorization: Token tiny-secret token_budget=1000",
+            "tiny-secret",
+            "token_budget=1000",
+        ),
+        (
+            "authorization=Negotiate abc.def.ghi token_budget=1000",
+            "abc.def.ghi",
+            "token_budget=1000",
+        ),
+        (
+            'Authorization: Digest username="foo", realm="example", response="tiny-secret" session_id=abc123',
+            "tiny-secret",
+            "session_id=abc123",
+        ),
+        (
+            "Proxy-Authorization: Basic tiny-secret session_id=abc123",
+            "tiny-secret",
+            "session_id=abc123",
+        ),
+        (
+            "proxy-authorization=Negotiate abc.def.ghi token_budget=1000",
+            "abc.def.ghi",
+            "token_budget=1000",
+        ),
+    ],
+)
+def test_diagnostics_redacts_non_bearer_authorization_values(
+    text: str,
+    secret: str,
+    preserved: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert secret not in redacted
+    assert preserved in redacted
+    assert (
+        "Authorization: <redacted>" in redacted
+        or "authorization=<redacted>" in redacted
+        or "Proxy-Authorization: <redacted>" in redacted
+        or "proxy-authorization=<redacted>" in redacted
+    )
+
+
+def test_diagnostics_redacts_parameterized_oauth_authorization_values() -> None:
+    text = (
+        'Authorization: OAuth oauth_consumer_key="client", '
+        'oauth_signature="tiny-secret" session_id=abc123'
+    )
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tiny-secret" not in redacted
+    assert "Authorization: <redacted> session_id=abc123" in redacted
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "preserved"),
+    [
+        (
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIA/test/aws4_request, "
+            "SignedHeaders=host;x-amz-date, Signature=tiny-secret session_id=aws123",
+            "tiny-secret",
+            "session_id=aws123",
+        ),
+        (
+            'Authorization: Signature keyId="client",algorithm="hmac-sha256",signature="tiny-secret" '
+            "token_budget=1000",
+            "tiny-secret",
+            "token_budget=1000",
+        ),
+    ],
+)
+def test_diagnostics_redacts_parameterized_authorization_values_for_any_scheme(
+    text: str,
+    secret: str,
+    preserved: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert secret not in redacted
+    assert preserved in redacted
+    assert "Authorization: <redacted>" in redacted
+
+
+def test_diagnostics_redacts_unclosed_quoted_sensitive_scalar() -> None:
+    redacted = redact_diagnostic_text('password: "correct horse battery staple', limit=1000)
+
+    assert "correct horse battery staple" not in redacted
+    assert redacted == "password: <redacted>"
+
+
+def test_diagnostics_redacts_multiline_quoted_sensitive_scalar() -> None:
+    redacted = redact_diagnostic_text(
+        'password: "correct horse\n battery staple"\nsession_id=abc123\n',
+        limit=1000,
+    )
+
+    assert "correct horse" not in redacted
+    assert "battery staple" not in redacted
+    assert redacted == "password: <redacted>\nsession_id=abc123\n"
+
+
+def test_diagnostics_redacts_pretty_printed_json_value_on_following_line() -> None:
+    redacted = redact_diagnostic_text(
+        '{\n  "api_key":\n    "tiny-secret",\n  "session_id": "json123"\n}',
+        limit=1000,
+    )
+
+    assert "tiny-secret" not in redacted
+    assert '"api_key":\n    "<redacted>"' in redacted
+    assert '"session_id": "json123"' in redacted
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"authorization":"Bearer tiny-secret","session_id":"abc123"}',
+        '{"cookie":"session=tiny-secret","session_id":"abc123"}',
+    ],
+)
+def test_diagnostics_redacts_quoted_json_authentication_fields(text: str) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tiny-secret" not in redacted
+    assert '"<redacted>"' in redacted
+    assert '"session_id":"abc123"' in redacted
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password: correct horse=staple session_id=abc123",
+        "password: correct horse_staple=value session_id=abc123",
+    ],
+)
+def test_diagnostics_fails_closed_for_unquoted_yaml_secret_with_assignment(
+    text: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+    assert redacted == "password: <redacted>"
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "expected"),
+    [
+        ("password: abc,def session_id=abc123", "abc,def", "password: <redacted>"),
+        (
+            "bot_token=tiny]} token_budget: 1000",
+            "tiny]}",
+            "bot_token=<redacted> token_budget: 1000",
+        ),
+    ],
+)
+def test_diagnostics_redacts_sensitive_scalars_with_punctuation(
+    text: str,
+    secret: str,
+    expected: str,
+) -> None:
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert secret not in redacted
+    assert redacted == expected
+
+
+@pytest.mark.parametrize(
+    "sensitive_pattern",
+    local_cli_backend_module._SENSITIVE_ENV_PATTERNS,
+)
+def test_uppercase_diagnostic_assignment_tracks_child_env_sensitive_contract(
+    sensitive_pattern: str,
+) -> None:
+    name_segment = sensitive_pattern.strip("_")
+    text = f"DSA_{name_segment}_VALUE=tiny-value"
+
+    redacted = redact_diagnostic_text(text, limit=1000)
+
+    assert "tiny-value" not in redacted
+    assert "<redacted>" in redacted
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "MONKEY=banana next",
+        "KEYBOARD_LAYOUT=us next",
+        "retry: 3 token_budget: 1000",
+        "docs=https://example.com/public/docs?monkey=banana&foo=bar",
+        "analysis_key_factor=valuation next",
+        "sort_key=price primary_key=id cache_key=reports",
+        "session_id=abc123 user_session: abc123",
+        'message: "normal diagnostic value"',
+    ],
+)
+def test_diagnostics_preserves_noncredential_assignments(text: str) -> None:
+    assert redact_diagnostic_text(text, limit=1000) == text
+
+
+def test_nonzero_exit_diagnostic_previews_redact_short_credentials(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("CUSTOM_API_KEY=stdout-short session_id=abc123")
+print("password: correct horse battery staple")
+print("backup_password: 'correct horse''s secret'")
+print("bot_token: tiny,trail token_budget: 1000")
+print("Authorization: Basic dGlueTpzZWNyZXQ= session_id=auth123")
+print('"api_keys": "stderr-short" token_budget: 1000', file=sys.stderr)
+print("private_key: |\\n  tiny-secret", file=sys.stderr)
+print("telegram_bot_token=tiny]} session_id=stderr123", file=sys.stderr)
+print("authorization=Token tiny-secret token_budget=1000", file=sys.stderr)
+print("authorization=Negotiate abc.def.ghi token_budget=2000", file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stdout_preview = exc_info.value.details["stdout_preview"]
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert "stdout-short" not in stdout_preview
+    assert "stderr-short" not in stderr_preview
+    assert "correct horse battery staple" not in stdout_preview
+    assert "correct horse''s secret" not in stdout_preview
+    assert "tiny-secret" not in stderr_preview
+    assert "tiny,trail" not in stdout_preview
+    assert "tiny]}" not in stderr_preview
+    assert "dGlueTpzZWNyZXQ=" not in stdout_preview
+    assert "abc.def.ghi" not in stderr_preview
+    assert "CUSTOM_API_KEY=<redacted>" in stdout_preview
+    assert "password: <redacted>" in stdout_preview
+    assert "backup_password: '<redacted>'" in stdout_preview
+    assert "bot_token: <redacted>" in stdout_preview
+    assert "Authorization: <redacted>" in stdout_preview
+    assert '"api_keys": "<redacted>"' in stderr_preview
+    assert "private_key: <redacted>" in stderr_preview
+    assert "telegram_bot_token=<redacted>" in stderr_preview
+    assert "authorization=<redacted>" in stderr_preview
+    assert "''s secret" not in stdout_preview
+    assert "session_id=abc123" in stdout_preview
+    assert "session_id=auth123" in stdout_preview
+    assert "session_id=stderr123" in stderr_preview
+    assert "token_budget: 1000" in stderr_preview
+    assert "token_budget=1000" in stderr_preview
+    assert "token_budget=2000" in stderr_preview
+
+
+def test_nonzero_exit_diagnostic_previews_redact_digest_proxy_and_camelcase_credentials(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        f"""
+import sys
+print('Authorization: Digest username="foo", realm="example", response="tiny-secret" session_id=auth123', file=sys.stderr)
+print('Proxy-Authorization: Basic proxy-short session_id=proxy123', file=sys.stderr)
+print('{{"accessToken":"json-short","session_id":"camel123"}}', file=sys.stderr)
+print('clientSecret: yaml-short token_budget=1000', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert "tiny-secret" not in stderr_preview
+    assert "proxy-short" not in stderr_preview
+    assert "json-short" not in stderr_preview
+    assert "yaml-short" not in stderr_preview
+    assert 'Authorization: <redacted> session_id=auth123' in stderr_preview
+    assert 'Proxy-Authorization: <redacted> session_id=proxy123' in stderr_preview
+    assert '{"accessToken":"<redacted>","session_id":"camel123"}' in stderr_preview
+    assert 'clientSecret: <redacted>\n' in stderr_preview
+
+
+def test_nonzero_exit_diagnostic_previews_redact_ansi_oauth_and_multiline_quoted_secrets(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("\\x1b[31mpassword: tiny\\x1b[0m session_id=ansi123")
+print('Authorization: OAuth oauth_consumer_key="client", oauth_signature="tiny-secret" session_id=oauth123', file=sys.stderr)
+print('password: "correct horse', file=sys.stderr)
+print(' battery staple"', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stdout_preview = exc_info.value.details["stdout_preview"]
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert "\x1b[" not in stdout_preview
+    assert "tiny" not in stdout_preview
+    assert "tiny-secret" not in stderr_preview
+    assert "correct horse" not in stderr_preview
+    assert "battery staple" not in stderr_preview
+    assert "password: <redacted>\n" in stdout_preview
+    assert "Authorization: <redacted> session_id=oauth123" in stderr_preview
+    assert "password: <redacted>\n" in stderr_preview
+
+
+def test_nonzero_exit_diagnostic_previews_redact_sensitive_collections(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("api_keys: [first-secret, second-secret] token_budget: 1000")
+print('{"credentials":{"username":"alice","value":"tiny-secret"},"session_id":"nested123"}', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stdout_preview = exc_info.value.details["stdout_preview"]
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert "first-secret" not in stdout_preview
+    assert "second-secret" not in stdout_preview
+    assert "tiny-secret" not in stderr_preview
+    assert "api_keys: <redacted> token_budget: 1000" in stdout_preview
+    assert '{"credentials":<redacted>,"session_id":"nested123"}' in stderr_preview
+
+
+def test_nonzero_exit_diagnostic_previews_redact_repo_env_json_and_parameterized_auth(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("AIHUBMIX_KEY=stdout-short session_id=stdout123")
+print("LONGBRIDGE_APP_KEY=stderr-short session_id=bridge123", file=sys.stderr)
+print("NTFY_URL=https://ntfy.sh/private-topic session_id=ntfy123", file=sys.stderr)
+print("PUSHOVER_USER_KEY=notify-short session_id=push123", file=sys.stderr)
+print('{', file=sys.stderr)
+print('  "api_key":', file=sys.stderr)
+print('    "json-short",', file=sys.stderr)
+print('  "session_id": "json123"', file=sys.stderr)
+print('}', file=sys.stderr)
+print("Authorization: AWS4-HMAC-SHA256 Credential=AKIA/20240101/test/aws4_request, SignedHeaders=host;x-amz-date, Signature=tiny-secret session_id=aws123", file=sys.stderr)
+print('Authorization: Signature keyId="client",algorithm="hmac-sha256",signature="sig-short" token_budget=1000', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stdout_preview = exc_info.value.details["stdout_preview"]
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert "stdout-short" not in stdout_preview
+    assert "stderr-short" not in stderr_preview
+    assert "https://ntfy.sh/private-topic" not in stderr_preview
+    assert "notify-short" not in stderr_preview
+    assert "json-short" not in stderr_preview
+    assert "tiny-secret" not in stderr_preview
+    assert "sig-short" not in stderr_preview
+    assert "AIHUBMIX_KEY=<redacted> session_id=stdout123" in stdout_preview
+    assert "LONGBRIDGE_APP_KEY=<redacted> session_id=bridge123" in stderr_preview
+    assert "NTFY_URL=<redacted> session_id=ntfy123" in stderr_preview
+    assert "PUSHOVER_USER_KEY=<redacted> session_id=push123" in stderr_preview
+    assert '"api_key":\n    "<redacted>"' in stderr_preview
+    assert '"session_id": "json123"' in stderr_preview
+    assert "Authorization: <redacted> session_id=aws123" in stderr_preview
+    assert "Authorization: <redacted> token_budget=1000" in stderr_preview
+
+
+def test_nonzero_exit_previews_redact_json_auth_and_embedded_assignments(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print("password: correct horse=staple session_id=abc123")
+print('{"authorization":"Bearer tiny-secret","session_id":"auth123"}', file=sys.stderr)
+print('{"cookie":"session=cookie-secret","session_id":"cookie123"}', file=sys.stderr)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    assert exc_info.value.error_code is GenerationErrorCode.NON_ZERO_EXIT
+    stdout_preview = exc_info.value.details["stdout_preview"]
+    stderr_preview = exc_info.value.details["stderr_preview"]
+    assert stdout_preview == "password: <redacted>\n"
+    assert "tiny-secret" not in stderr_preview
+    assert "cookie-secret" not in stderr_preview
+    assert '{"authorization":"<redacted>","session_id":"auth123"}' in stderr_preview
+    assert '{"cookie":"<redacted>","session_id":"cookie123"}' in stderr_preview
+
+
+def test_preview_diagnostics_from_files_redacts_truncated_quoted_sensitive_scalar(
+    tmp_path: Path,
+) -> None:
+    long_password = "correct horse battery staple " * 130
+    stderr_text = f'password: "{long_password}"\n'
+    assert len(stderr_text.encode("utf-8")) > local_cli_backend_module._PREVIEW_LIMIT * 4
+
+    stdout_path = tmp_path / "stdout.txt"
+    stderr_path = tmp_path / "stderr.txt"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
+
+    previews = local_cli_backend_module._preview_diagnostics_from_files(stdout_path, stderr_path)
+
+    assert "correct horse battery staple" not in previews["stderr_preview"]
+    assert previews["stderr_preview"] == "password: <redacted>"
 
 
 def test_effective_local_cli_concurrency_uses_minimum() -> None:
