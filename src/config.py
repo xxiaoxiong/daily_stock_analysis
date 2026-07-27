@@ -611,15 +611,27 @@ def normalize_agent_litellm_model(
     model: str,
     configured_models: Optional[set[str]] = None,
 ) -> str:
-    """Normalize AGENT_LITELLM_MODEL while preserving configured router aliases."""
-    normalized_model = (model or "").strip()
-    if not normalized_model:
-        return ""
-    if "/" not in normalized_model:
-        if configured_models and normalized_model in configured_models:
-            return normalized_model
-        return f"openai/{normalized_model}"
-    return normalized_model
+    """Normalize AGENT_LITELLM_MODEL while preserving configured lookup semantics.
+
+    - Configured router aliases (channel-prefixed or bare) are accepted
+      as-is so EnvironmentChecker / is_agent_available() route checks keep
+      working (Review comment #2094, Issue #2112).
+    - Unconfigured bare models get the `openai/` prefix so litellm can
+      delegate directly instead of treating them as aliases.
+    """
+    stripped = model.strip()
+    # 1) Exact configured-model alias wins — preserves channel order and
+    #    avoids rattling through the rest of the pipeline (reviewer
+    #    complaint: pure accent tokens still hit openai/ heuristic).
+    if configured_models and stripped in configured_models:
+        return stripped
+    # 2) Provider route aliases pass through; bare unconfigured names
+    #    get the `openai/` prefix so litellm delegates directly.
+    if "/" not in stripped:
+        if not stripped:
+            return ""
+        return f"openai/{stripped}"
+    return stripped
 
 
 def get_effective_agent_primary_model(config: "Config") -> str:
