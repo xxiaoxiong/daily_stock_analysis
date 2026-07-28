@@ -1294,15 +1294,22 @@ def _redact_sensitive_diagnostic_assignments(text: str) -> str:
         last_end = -1
         for match in _DIAGNOSTIC_ENV_ASSIGNMENT_PREFIX_PATTERN.finditer(source):
             value_start = match.end()
-            if value_start < last_end or source[value_start:value_start + 2] != "$(":
+            if value_start < last_end:
                 continue
             if not _is_sensitive_env_name(match.group("name")):
                 continue
-            value_end = _consume_shell_command_substitution(source, value_start)
-            if value_end <= value_start:
-                continue
-            replacements.append((value_start, value_end, "<redacted>"))
-            last_end = value_end
+            cursor = value_start
+            while cursor < len(source):
+                next_dollar = source.find("$", cursor)
+                if next_dollar == -1 or next_dollar + 1 >= len(source) or source[next_dollar + 1] != "(":
+                    break
+                sub_start = next_dollar
+                sub_end = _consume_shell_command_substitution(source, sub_start)
+                if sub_end <= sub_start:
+                    break
+                replacements.append((sub_start, sub_end, "<redacted>"))
+                last_end = sub_end
+                cursor = sub_end
         return _replace_spans(source, replacements)
 
     redacted = _redact_yaml_explicit_sensitive_fields(text)

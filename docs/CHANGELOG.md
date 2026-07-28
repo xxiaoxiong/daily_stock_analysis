@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 - [修复] 本地 CLI 的 `stdout_preview` / `stderr_preview` 按环境变量、JSON、YAML/日志标量与 URL 的独立契约脱敏短凭证，避免小于 32 字符的 API key、secret 或 token 进入诊断；普通字段仅按敏感名称判定，未加引号的 YAML 敏感标量则 fail-closed 脱敏至行尾（refs #1784）。
+- [修复] `_redact_sensitive_diagnostic_assignments` 现在能处理 `KEY=prefix$(...)$(SECRET)` 这类多个命令替换串联的敏感值，整段值统一脱敏为 `<redacted>`，防止 `SECRET_TOKEN` 等嵌入密钥从 stdout/stderr 预览泄漏到诊断日志（refs #1784）。
 
 ## [3.28.0] - 2026-07-26
 

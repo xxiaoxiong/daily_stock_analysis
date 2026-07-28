@@ -2915,6 +2915,56 @@ raise SystemExit(2)
     assert "export OPENAI_API_KEY=<redacted> session_id=stderr789" in stderr_preview
 
 
+def test_nonzero_exit_previews_redact_sensitive_env_command_substitutions_with_prefix(
+    tmp_path: Path,
+) -> None:
+    """Regression test for OR-COR-bf97c3de: when a sensitive env assignment value
+    has a literal prefix before the first $(...), every $(...) substitution in
+    the value must still be redacted, not only the first one.
+
+    Previously the redactor only consumed the first $(...) after the prefix and
+    left subsequent $() substitutions intact, leaking the embedded secrets.
+    """
+    backend = _backend(
+        tmp_path,
+        """
+import sys
+print(
+    "OPENAI_API_KEY=prefix$(printf %s inner-secret)$(printf %s tail-secret) "
+    "session_id=mixed789",
+    file=sys.stderr,
+)
+print(
+    "export ANTHROPIC_TOKEN=prefix $(printf %s a) $(printf %s b) "
+    "session_id=mixed-anth",
+    file=sys.stderr,
+)
+raise SystemExit(2)
+""",
+    )
+
+    with pytest.raises(GenerationError) as exc_info:
+        backend.generate("prompt", {})
+
+    stderr_preview = exc_info.value.details["stderr_preview"]
+
+    # Embedded secrets (both substitutions) must be fully redacted.
+    for secret in (
+        "inner-secret",
+        "tail-secret",
+        "printf %s a",
+        "printf %s b",
+    ):
+        assert secret not in stderr_preview, (
+            f"secret {secret!r} leaked into preview: {stderr_preview!r}"
+        )
+    # The env assignment redactor replaces the whole value with <redacted>,
+    # so we verify the assignment boundary is clean and no secret tails
+    # survive past the redacted token.
+    assert "OPENAI_API_KEY=<redacted> session_id=mixed789" in stderr_preview
+    assert "export ANTHROPIC_TOKEN=<redacted> session_id=mixed-anth" in stderr_preview
+
+
 def test_nonzero_exit_previews_redact_json_auth_and_embedded_assignments(
     tmp_path: Path,
 ) -> None:
